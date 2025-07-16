@@ -149,6 +149,7 @@ RUN python3 -m pip install --upgrade pip setuptools \
     triangle \
     termcolor \
     meshcat \
+    opencv-python \
     git+https://github.com/fishbotics/pointnet2_ops.git@v3.2.0 \
   && python3 -m pip install git+https://github.com/fishbotics/robofin.git@v0.0.1 git+https://github.com/fishbotics/atob@v0.0.1
 
