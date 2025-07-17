@@ -14,11 +14,11 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: null #/workspace/mpinets_hybrid_expert.ckpt
+model_path: /workspace/mpinets_hybrid_expert.ckpt
 checkpoint_interval: 10
 validation_interval: 4
 gpus: 1 # If > 1, will use DDP for training.
 batch_size: 32
 save_checkpoint_dir: /workspace/mpinets_pretrain
-experiment_name: finetune_cubby_6k_null
+experiment_name: finetune_cubby_6k_with_pretrain
 description: "finetune training"

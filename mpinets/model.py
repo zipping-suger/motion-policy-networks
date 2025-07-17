@@ -232,12 +232,12 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         )
         self.log("point_match_loss", point_match_loss)
         self.log("collision_loss", collision_loss)
-        val_loss = (
+        train_loss = (
             self.point_match_loss_weight * point_match_loss
             + self.collision_loss_weight * collision_loss
         )
-        self.log("val_loss", val_loss)
-        return val_loss
+        self.log("train_loss", train_loss)
+        return train_loss
 
     def sample(self, q: torch.Tensor) -> torch.Tensor:
         """

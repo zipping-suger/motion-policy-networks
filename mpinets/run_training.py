@@ -99,13 +99,13 @@ def setup_trainer(
             dirpath = PROJECT_ROOT / "checkpoints" / experiment_id
         pl.utilities.rank_zero_info(f"Saving checkpoints to {dirpath}")
         every_n_checkpoint = ModelCheckpoint(
-            monitor="val_loss",
+            monitor="train_loss",
             save_last=True,
             dirpath=dirpath,
             train_time_interval=timedelta(minutes=checkpoint_interval),
         )
         epoch_end_checkpoint = ModelCheckpoint(
-            monitor="val_loss",
+            monitor="train_loss",
             save_last=True,
             dirpath=dirpath,
             save_on_train_epoch_end=True,
