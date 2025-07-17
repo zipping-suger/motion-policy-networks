@@ -38,6 +38,16 @@ PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 sys.path.insert(0, PROJECT_ROOT)
 from mpinets.data_loader import DataModule
 from mpinets.model import TrainingMotionPolicyNetwork
+from mpinets.model_opt import TrainingPolicyNetOpt
+
+
+def import_training_policy_net(mode):
+    if mode == "finetune" or mode == "finetune_tasks":
+        return TrainingPolicyNetOpt
+    elif mode == "pretrain":
+        return TrainingMotionPolicyNetwork
+    else:
+        raise ValueError(f"Unknown training mode: {mode}. Expected 'finetune' or 'pretrain'.")
 
 
 def setup_trainer(
@@ -188,13 +198,31 @@ def run():
     )
     dm = DataModule(
         batch_size=config["batch_size"],
+        train_mode=config["train_mode"],
         **(config["shared_parameters"] or {}),
         **(config["data_module_parameters"] or {}),
     )
-    mdl = TrainingMotionPolicyNetwork(
+    mode = config["train_mode"]
+    TrainingPolicyNet = import_training_policy_net(mode)
+    
+    # Initialize the model
+    mdl = TrainingPolicyNet(
         **(config["shared_parameters"] or {}),
         **(config["training_model_parameters"] or {}),
     )
+    if config["model_path"] is None:
+        print("Training from scratch")
+        mdl = TrainingPolicyNet(
+            **(config["shared_parameters"] or {}),
+            **(config["training_model_parameters"] or {}),
+        )
+    else:
+        print(f"Loading model from {config['model_path']}")
+        mdl = TrainingPolicyNet.load_from_checkpoint(
+            config["model_path"],
+            **(config["shared_parameters"] or {}),
+            **(config["training_model_parameters"] or {}),
+        )
     if logger is not None:
         logger.watch(mdl, log="gradients", log_freq=100)
     trainer.fit(model=mdl, datamodule=dm)

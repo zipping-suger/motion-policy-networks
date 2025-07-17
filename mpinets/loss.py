@@ -164,3 +164,35 @@ class CollisionAndBCLossContainer:
             ),
             point_match_loss(input_pc, target_pc),
         )
+
+
+def compute_pose_loss_rotmat(
+    pred_pose: torch.Tensor,
+    target_pose: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Computes position and rotation loss between predicted and target end-effector poses.
+
+    Args:
+        pred_pose (torch.Tensor): Predicted pose (B, 4, 4)
+        target_pose (torch.Tensor): Target pose (B, 12): [x, y, z, flattened 3x3 rotation matrix (row-major)]
+
+    Returns:
+        position_loss (torch.Tensor): (B,) squared Euclidean position loss
+        rotation_loss (torch.Tensor): (B,) squared Frobenius norm between rotation matrices
+    """
+    # Extract target position and rotation matrix
+    target_pos = target_pose[:, 0:3]  # (B, 3)
+    target_rot = target_pose[:, 3:12].view(-1, 3, 3)  # (B, 3, 3)
+
+    # Extract predicted rotation and translation
+    pred_rot = pred_pose[:, :3, :3]  # (B, 3, 3)
+    pred_pos = pred_pose[:, :3, 3]   # (B, 3)
+
+    # Position loss (squared Euclidean distance)
+    position_loss = torch.sum((pred_pos - target_pos) ** 2, dim=1)  # (B,)
+
+    # Rotation loss (Chordal Distance = squared Frobenius norm)
+    rotation_loss = torch.sum((pred_rot - target_rot) ** 2, dim=(1, 2))  # (B,)
+
+    return position_loss, rotation_loss

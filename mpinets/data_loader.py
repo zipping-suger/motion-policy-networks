@@ -47,6 +47,232 @@ class DatasetType(enum.Enum):
     TRAIN = 0
     VAL = 1
     TEST = 2
+    
+    
+class TaskDataset(Dataset):
+
+    def __init__(
+        self,
+        directory: Path,
+        trajectory_key: str,
+        num_robot_points: int,
+        num_obstacle_points: int,
+        num_target_points: int,
+        dataset_type: DatasetType,
+        random_scale: float,
+    ):
+        """
+        :param directory Path: The path to the root of the data directory
+        :param num_robot_points int: The number of points to sample from the robot
+        :param num_obstacle_points int: The number of points to sample from the obstacles
+        :param dataset_type DatasetType: What type of dataset this is
+        :param random_scale float: The standard deviation of the random normal
+                                   noise to apply to the joints during training.
+                                   This is only used for train datasets.
+        """
+        self._init_directory(directory, dataset_type)
+        self.trajectory_key = trajectory_key  # TODO: Remove this unused variable
+        self.train = dataset_type == DatasetType.TRAIN
+
+        self.num_obstacle_points = num_obstacle_points
+        self.num_robot_points = num_robot_points
+        self.num_target_points = num_target_points
+        self.random_scale = random_scale
+        self.fk_sampler = FrankaSampler("cpu", use_cache=True)
+        with h5py.File(str(self._database), "r") as f:
+            self._length = f['target_poses'].shape[0]
+        
+    def __len__(self):
+        """
+        Necessary for Pytorch. For this dataset, the length is the total number
+        of problems
+        """
+        return self._length
+
+    def _init_directory(self, directory: Path, dataset_type: DatasetType):
+        """
+        Sets the path for the internal data structure based on the dataset type
+
+        :param directory Path: The path to the root of the data directory
+        :param dataset_type DatasetType: What type of dataset this is
+        :raises Exception: Raises an exception when the dataset type is unsupported
+        """
+        self.type = dataset_type
+        if dataset_type == DatasetType.TRAIN:
+            directory = directory / "train"
+        elif dataset_type == DatasetType.VAL:
+            directory = directory / "val"
+        elif dataset_type == DatasetType.TEST:
+            directory = directory / "test"
+        else:
+            raise Exception(f"Invalid dataset type: {dataset_type}")
+
+        databases = list(directory.glob("**/*.hdf5"))
+        print(f"Databases found: {databases}")
+        assert len(databases) == 1
+        self._database = databases[0]
+
+    @staticmethod
+    def normalize(configuration_tensor: torch.Tensor):
+        """
+        Normalizes the joints between -1 and 1 according the the joint limits
+
+        :param configuration_tensor torch.Tensor: The input tensor. Has dim [7]
+        """
+        return utils.normalize_franka_joints(configuration_tensor)
+    
+    def _construct_pointcloud(self, robot_points, obstacle_points, target_points):
+        """
+        Construct the point cloud with features as shown in the example.
+        """
+        obstacle_points = torch.as_tensor(obstacle_points[:, :3]).float()
+        
+        xyz = torch.cat(
+            (
+                torch.zeros(self.num_robot_points, 4),
+                torch.ones(self.num_obstacle_points, 4),
+                2 * torch.ones(self.num_target_points, 4),
+            ),
+            dim=0,
+        )
+        
+        xyz[:self.num_robot_points, :3] = robot_points.float()
+        xyz[self.num_robot_points:self.num_robot_points+self.num_obstacle_points, :3] = obstacle_points
+        xyz[self.num_robot_points+self.num_obstacle_points:, :3] = target_points.float()
+        
+        return xyz
+    
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """
+        Required by Pytorch. Queries for data at a particular index. Note that
+        in this dataset, the index always corresponds to the trajectory index.
+
+        :param idx int: The index
+        :rtype Dict[str, torch.Tensor]: Returns a dictionary that can be assembled
+            by the data loader before using in training.
+        """
+        
+        item = {}
+        with h5py.File(str(self._database), "r") as f:
+            # Target
+            target_config = f['target_configs'][idx]              
+            target_pose = FrankaRealRobot.fk(
+                target_config
+            )
+            
+            target_pose_matrix = target_pose.matrix            
+    
+            target_points = self.fk_sampler.sample_end_effector(
+                torch.as_tensor(target_pose_matrix).float(),
+                num_points=self.num_target_points,
+            )
+            
+            target_position = torch.as_tensor(target_pose_matrix[:3, 3], dtype=torch.float32)
+            
+            # Use rotation matrix R9 as rotation representation
+            target_rot_mat = torch.as_tensor(target_pose.matrix[:3, :3].flatten(), dtype=torch.float32)
+            item["target_position"] = target_position
+            item["target_rotation"] = target_rot_mat
+            item["target_pose"] = torch.cat((target_position, target_rot_mat), dim=0).float()
+            item["target_configuration"] = torch.as_tensor(target_config).float()
+            
+            # Start configuration
+            start_config = f['start_configs'][idx]
+            config_tensor = torch.as_tensor(start_config).float()
+
+            if self.train:
+                # Add slight random noise to the joints
+                randomized = (
+                    self.random_scale * torch.randn(config_tensor.shape) + config_tensor
+                )
+                limits = torch.as_tensor(FrankaRealRobot.JOINT_LIMITS).float()
+                randomized = torch.minimum(
+                    torch.maximum(randomized, limits[:, 0]), limits[:, 1]
+                )
+                item["configuration"] = self.normalize(randomized)
+                robot_points = self.fk_sampler.sample(randomized, self.num_robot_points)
+            else:
+                item["configuration"] = self.normalize(config_tensor)
+                robot_points = self.fk_sampler.sample(
+                    config_tensor, self.num_robot_points
+                )
+
+            cuboid_dims = f["cuboid_dims"][idx, ...]
+            if cuboid_dims.ndim == 1:
+                cuboid_dims = np.expand_dims(cuboid_dims, axis=0)
+
+            cuboid_centers = f["cuboid_centers"][idx, ...]
+            if cuboid_centers.ndim == 1:
+                cuboid_centers = np.expand_dims(cuboid_centers, axis=0)
+
+            cuboid_quats = f["cuboid_quaternions"][idx, ...]
+            if cuboid_quats.ndim == 1:
+                cuboid_quats = np.expand_dims(cuboid_quats, axis=0)
+            # Entries without a shape are stored with an invalid quaternion of all zeros
+            # This will cause NaNs later in the pipeline. It's best to set these to unit
+            # quaternions.
+            # To find invalid shapes, we just look for a dimension with size 0
+            cuboid_quats[np.all(np.isclose(cuboid_quats, 0), axis=1), 0] = 1
+
+            # Leaving in the zero volume cuboids to conform to a standard
+            # Pytorch array size. These have to be filtered out later
+            item["cuboid_dims"] = torch.as_tensor(cuboid_dims)
+            item["cuboid_centers"] = torch.as_tensor(cuboid_centers)
+            item["cuboid_quats"] = torch.as_tensor(cuboid_quats)
+
+            if "cylinder_radii" not in f.keys():
+                # Create a dummy cylinder if cylinders aren't in the hdf5 file
+                cylinder_radii = np.array([[0.0]])
+                cylinder_heights = np.array([[0.0]])
+                cylinder_centers = np.array([[0.0, 0.0, 0.0]])
+                cylinder_quats = np.array([[1.0, 0.0, 0.0, 0.0]])
+            else:
+                cylinder_radii = f["cylinder_radii"][idx, ...]
+                if cylinder_radii.ndim == 1:
+                    cylinder_radii = np.expand_dims(cylinder_radii, axis=0)
+                cylinder_heights = f["cylinder_heights"][idx, ...]
+                if cylinder_heights.ndim == 1:
+                    cylinder_heights = np.expand_dims(cylinder_heights, axis=0)
+                cylinder_centers = f["cylinder_centers"][idx, ...]
+                if cylinder_centers.ndim == 1:
+                    cylinder_centers = np.expand_dims(cylinder_centers, axis=0)
+                cylinder_quats = f["cylinder_quaternions"][idx, ...]
+                if cylinder_quats.ndim == 1:
+                    cylinder_quats = np.expand_dims(cylinder_quats, axis=0)
+                # Ditto to the comment above about fixing ill-formed quaternions
+                cylinder_quats[np.all(np.isclose(cylinder_quats, 0), axis=1), 0] = 1
+
+            item["cylinder_radii"] = torch.as_tensor(cylinder_radii)
+            item["cylinder_heights"] = torch.as_tensor(cylinder_heights)
+            item["cylinder_centers"] = torch.as_tensor(cylinder_centers)
+            item["cylinder_quats"] = torch.as_tensor(cylinder_quats)
+
+            cuboids = [
+                Cuboid(c, d, q)
+                for c, d, q in zip(
+                    list(cuboid_centers), list(cuboid_dims), list(cuboid_quats)
+                )
+            ]
+
+            # Filter out the cuboids with zero volume
+            cuboids = [c for c in cuboids if not c.is_zero_volume()]
+
+            cylinders = [
+                Cylinder(c, r, h, q)
+                for c, r, h, q in zip(
+                    list(cylinder_centers),
+                    list(cylinder_radii.squeeze(1)),
+                    list(cylinder_heights.squeeze(1)),
+                    list(cylinder_quats),
+                )
+            ]
+            cylinders = [c for c in cylinders if not c.is_zero_volume()]
+
+            obstacle_points = construct_mixed_point_cloud(
+                cuboids + cylinders, self.num_obstacle_points
+            )
+            item["xyz"] = self._construct_pointcloud(robot_points, obstacle_points, target_points)
+        return item
 
 
 class PointCloudBase(Dataset):
@@ -159,7 +385,13 @@ class PointCloudBase(Dataset):
                 torch.as_tensor(target_pose.matrix).float(),
                 num_points=self.num_target_points,
             )
-            item["target_position"] = torch.as_tensor(target_pose.xyz).float()
+            
+            target_position = torch.as_tensor(target_pose.xyz).float()
+            # Use rotation matrix R9 as rotation representation
+            target_rot_mat = torch.as_tensor(target_pose.matrix[:3, :3].flatten(), dtype=torch.float32)
+            item["target_position"] = target_position
+            item["target_rotation"] = target_rot_mat
+            item["target_pose"] = torch.cat((target_position, target_rot_mat), dim=0).float()
 
             config = f[self.trajectory_key][trajectory_idx, timestep, :]
             config_tensor = torch.as_tensor(config).float()
@@ -297,6 +529,7 @@ class PointCloudTrajectoryDataset(PointCloudBase):
         num_obstacle_points: int,
         num_target_points: int,
         dataset_type: DatasetType,
+        random_scale: float,
     ):
         """
         :param directory Path: The path to the root of the data directory
@@ -306,9 +539,6 @@ class PointCloudTrajectoryDataset(PointCloudBase):
                                       robot end effector
         :param dataset_type DatasetType: What type of dataset this is
         """
-        assert (
-            dataset_type != DatasetType.TRAIN
-        ), "This dataset is not meant for training"
         super().__init__(
             directory,
             trajectory_key,
@@ -316,7 +546,7 @@ class PointCloudTrajectoryDataset(PointCloudBase):
             num_obstacle_points,
             num_target_points,
             dataset_type,
-            random_scale=0.0,
+            random_scale,
         )
 
     def __len__(self):
@@ -427,6 +657,7 @@ class DataModule(pl.LightningDataModule):
         num_target_points: int,
         random_scale: float,
         batch_size: int,
+        train_mode: str,
     ):
         """
         :param data_dir str: The directory with the data. Directory structure should
@@ -449,6 +680,7 @@ class DataModule(pl.LightningDataModule):
         self.num_target_points = num_target_points
         self.num_workers = os.cpu_count()
         self.random_scale = random_scale
+        self.train_mode = train_mode
 
     def setup(self, stage: Optional[str] = None):
         """
@@ -459,30 +691,70 @@ class DataModule(pl.LightningDataModule):
                                     procedure or if we are doing ad-hoc testing
         """
         if stage == "fit" or stage is None:
-            self.data_train = PointCloudInstanceDataset(
-                self.data_dir,
-                self.trajectory_key,
-                self.num_robot_points,
-                self.num_obstacle_points,
-                self.num_target_points,
-                dataset_type=DatasetType.TRAIN,
-                random_scale=self.random_scale,
-            )
-            self.data_val = PointCloudTrajectoryDataset(
-                self.data_dir,
-                self.trajectory_key,
-                self.num_robot_points,
-                self.num_obstacle_points,
-                self.num_target_points,
-                dataset_type=DatasetType.VAL,
-            )
+            if self.train_mode == "pretrain":
+                # Use PointCloudInstanceDataset for pretraining (behavioral cloning)
+                self.data_train = PointCloudInstanceDataset(
+                    self.data_dir,
+                    self.trajectory_key,
+                    self.num_robot_points,
+                    self.num_obstacle_points,
+                    self.num_target_points,
+                    dataset_type=DatasetType.TRAIN,
+                    random_scale=self.random_scale,
+                )
+            elif self.train_mode == "finetune":
+                # Use PointCloudTrajectoryDataset for fine-tuning (optimization)
+                self.data_train = PointCloudTrajectoryDataset(
+                    self.data_dir,
+                    self.trajectory_key,
+                    self.num_robot_points,
+                    self.num_obstacle_points,
+                    self.num_target_points,
+                    dataset_type=DatasetType.TRAIN,
+                    random_scale=self.random_scale,
+                )
+            elif self.train_mode == "finetune_tasks":
+                # Use ProblemDataset for fine-tuning tasks
+                self.data_train = TaskDataset(
+                    self.data_dir,
+                    self.trajectory_key,
+                    self.num_robot_points,
+                    self.num_obstacle_points,
+                    self.num_target_points,
+                    dataset_type=DatasetType.TRAIN,
+                    random_scale=self.random_scale,
+                )
+            else:
+                raise ValueError(f"Unknown training mode: {self.train_mode}. Expected 'pretrain' or 'finetune'.")
+            
+            if self.train_mode in ["pretrain", "finetune"]:
+                self.data_val = PointCloudTrajectoryDataset(
+                    self.data_dir,
+                    self.trajectory_key,
+                    self.num_robot_points,
+                    self.num_obstacle_points,
+                    self.num_target_points,
+                    dataset_type=DatasetType.VAL,
+                    random_scale=0.0,  # No random scale for validation
+                )
+            elif self.train_mode == "finetune_tasks":
+                self.data_val = TaskDataset(
+                    self.data_dir,
+                    self.trajectory_key,
+                    self.num_robot_points,
+                    self.num_obstacle_points,
+                    self.num_target_points,
+                    dataset_type=DatasetType.VAL,
+                    random_scale=0.0,  # No random scale for validation
+                )
+            else:
+                raise ValueError(f"Unknown training mode: {self.train_mode}. Expected 'pretrain', 'finetune', or 'finetune_tasks'.")
         if stage == "test" or stage is None:
             self.data_test = PointCloudInstanceDataset(
                 self.data_dir,
                 self.trajectory_key,
                 self.num_robot_points,
                 self.num_obstacle_points,
-                self.num_target_points,
                 dataset_type=DatasetType.TEST,
                 random_scale=self.random_scale,
             )
@@ -498,6 +770,7 @@ class DataModule(pl.LightningDataModule):
             self.batch_size,
             num_workers=self.num_workers,
             pin_memory=True,
+            shuffle=True,  # shuffle the training data
         )
 
     def val_dataloader(self) -> DataLoader:
@@ -525,3 +798,4 @@ class DataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
         )
+
