@@ -6,45 +6,25 @@
 set -euo pipefail
 
 # --- Hardcoded Paths ---
-CONTAINER_IMAGE="/cluster/scratch/yixili/learn_to_reach"
-PIPELINE_DIR="/cluster/home/yixili/data_pipeline"
-RAW_DIR="/cluster/home/yixili/raw_data"
-SCRATCH_TMP="/cluster/scratch/yixili/tmp"  # Custom tmp dir (avoid /tmp issues)
-
-# --- Task Definitions ---
-declare -A TASKS=(
-  [task-oriented]=task
-  [neutral]=neutral
-  [free-space]=free
-  [mixed]=mixed
-)
-
-# --- Ensure Scratch TMP Exists ---
-mkdir -p "$SCRATCH_TMP"
+CONTAINER_IMAGE="/cluster/scratch/yixili/mpinets"
+CODE_DIR="/cluster/home/yixili/motion-policy-networks"
+DATA_DIR="/cluster/home/yixili/motion_policy/pretrain_data"
+CHECKPOINT_DIR="/cluster/home/yixili/motion-policy-networks/checkpoints"  # Directory for saving checkpoints
 
 echo "Starting Singularity container: $CONTAINER_IMAGE"
 
-for TYPE in "${!TASKS[@]}"; do
-  OUTDIR="${TASKS[$TYPE]}"
-  echo "=== Running $TYPE (Output: $OUTDIR) ==="
+# --- Run Singularity  ---
+singularity exec \
+  --nv \
+  --containall --writable-tmpfs \
+  --bind "${CODE_DIR}:/root/mpinets" \
+  --bind "${DATA_DIR}:/data" \
+  --bind "${CHECKPOINT_DIR}:/workspace" \
+  --env PYTHONUNBUFFERED=1 \
+  --env PYTHONPATH="/root/mpinets:\${PYTHONPATH:-}" \
+  --env NVIDIA_DRIVER_CAPABILITIES=all \
+  --env ACCEPT_EULA=Y \
+  "${CONTAINER_IMAGE}" \
+  bash -c "wandb login e69097b8c1bd646d9218e652823487632097445d && python3 mpinets/mpinets/run_training.py mpinets/train_configs/pretrain.yaml"
 
-  # --- Run Singularity with Proper TMPDIR ---
-  # Bind scratch to /tmp in container
-  singularity exec \
-    --nv \
-    --containall --writable-tmpfs \
-    --bind "${PIPELINE_DIR}:/data_pipeline" \
-    --bind "${RAW_DIR}:/raw_data" \
-    --bind "${SCRATCH_TMP}:/tmp" \
-    --env PYTHONUNBUFFERED=1 \
-    --env PYTHONPATH="/data_pipeline:\${PYTHONPATH:-}" \
-    --env NVIDIA_DRIVER_CAPABILITIES=all \
-    --env ACCEPT_EULA=Y \
-    --env TMPDIR="$SCRATCH_TMP" \
-    "${CONTAINER_IMAGE}" \
-    /usr/bin/python3 -u /data_pipeline/task_gen.py cubby "$TYPE" full-pipeline "/raw_data/table_finetune_tasks/$OUTDIR/"
-
-  echo "=== Completed $TYPE ==="
-done
-
-echo "All runs completed."
+echo "=== Completed ==="

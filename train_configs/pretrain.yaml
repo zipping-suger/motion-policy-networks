@@ -5,7 +5,7 @@ training_model_parameters:
     collision_loss_weight: 5
 
 data_module_parameters:
-  data_dir: /data/mpinets_hybrid_training_data_small
+  data_dir: /data/ompl_cubby_6k
   trajectory_key: 'global_solutions' # Could also use 'global_solutions' for the global expert
   num_obstacle_points: 4096
   num_target_points: 128
@@ -19,5 +19,5 @@ validation_interval: 3000
 gpus: 1 # If > 1, will use DDP for training.
 batch_size: 16
 save_checkpoint_dir: /workspace/mpinets_pretrain
-experiment_name: Test_pretrain_MPINets
-description: "Test training job for MPINets with global_solutions data."
+experiment_name: pretrain_cubby_6k
+description: "Pretraining on the cubby dataset with 6k trajectories."
