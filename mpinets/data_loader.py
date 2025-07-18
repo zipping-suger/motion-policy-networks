@@ -682,7 +682,7 @@ class DataModule(pl.LightningDataModule):
         self.num_robot_points = num_robot_points
         self.num_obstacle_points = num_obstacle_points
         self.num_target_points = num_target_points
-        self.num_workers = 32    # 32 for cluster, 16 for local testing
+        self.num_workers = 16 
         self.random_scale = random_scale
         self.train_mode = train_mode
 
