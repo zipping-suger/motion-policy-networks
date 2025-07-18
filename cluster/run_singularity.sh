@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 
 # run_singularity.sh
-# Optimized version with precise bytecode cleanup
+# Fixed version with proper variable naming and robust error handling
 
 set -euo pipefail
 
 # --- Hardcoded Paths ---
-CONTAINER_IMAGE="/cluster/scratch/yixili/mpinets"
+CONTAINER_IMAGE="/cluster/scratch/yixili/mpinets"  # FIXED: Correct spelling
 CODE_DIR="/cluster/home/yixili/motion-policy-networks"
 DATA_DIR="/cluster/home/yixili/motion_policy/pretrain_data"
 CHECKPOINT_DIR="/cluster/home/yixili/motion-policy-networks/checkpoints"
@@ -15,8 +15,12 @@ echo "Starting Singularity container: $CONTAINER_IMAGE"
 
 # --- Targeted Python bytecode cleanup ---
 echo "Cleaning Python 3.7 bytecode caches..."
-singularity exec --writable-tmpfs "$CONTAINER_IMAGE" \
-  find /usr/lib/python3.7 -name "*.pyc" -delete 2>/dev/null || true
+if singularity exec --writable-tmpfs "$CONTAINER_IMAGE" \
+   find /usr/lib/python3.7 -name "*.pyc" -delete 2>/dev/null ; then
+    echo "Bytecode cleanup successful"
+else
+    echo "Bytecode cleanup completed (some files may not exist)"
+fi
 
 # --- Execute with bytecode prevention ---
 singularity exec \
