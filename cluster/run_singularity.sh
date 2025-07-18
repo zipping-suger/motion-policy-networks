@@ -1,38 +1,43 @@
 #!/usr/bin/env bash
 
 # run_singularity.sh
-# Fixed version with proper variable naming and robust error handling
+# Matches Docker functionality and runs training script
 
 set -euo pipefail
 
-# --- Hardcoded Paths ---
-CONTAINER_IMAGE="/cluster/scratch/yixili/mpinets"  # FIXED: Correct spelling
+# --- Paths ---
+CONTAINER_IMAGE="/cluster/scratch/yixili/mpinets"
 CODE_DIR="/cluster/home/yixili/motion-policy-networks"
 DATA_DIR="/cluster/home/yixili/motion_policy/pretrain_data"
 CHECKPOINT_DIR="/cluster/home/yixili/motion-policy-networks/checkpoints"
 
-echo "Starting Singularity container: $CONTAINER_IMAGE"
+# --- Display settings (matching Docker's X11 forwarding) ---
+export DISPLAY=${DISPLAY:-:0}
+export XAUTHORITY=${XAUTHORITY:-$HOME/.Xauthority}
 
-# --- Execute with bytecode prevention ---
+echo "Starting Singularity container "
+
 singularity exec \
   --nv \
-  --containall --writable-tmpfs \
+  --cleanenv \
+  --writable-tmpfs \
+  --containall \
+  --net \
+  --network-args "portmap=host" \
   --bind "${CODE_DIR}:/root/mpinets" \
   --bind "${DATA_DIR}:/data" \
   --bind "${CHECKPOINT_DIR}:/workspace" \
-  --env PYTHONUNBUFFERED=1 \
+  --bind "/tmp/.X11-unix:/tmp/.X11-unix" \
+  --bind "${XAUTHORITY}:${XAUTHORITY}" \
+  --env DISPLAY="$DISPLAY" \
+  --env XAUTHORITY="$XAUTHORITY" \
+  --env NVIDIA_DRIVER_CAPABILITIES="all" \
+  --env ACCEPT_EULA="Y" \
   --env PYTHONPATH="/root/mpinets" \
-  --env PYTHONHOME="" \
-  --env NVIDIA_DRIVER_CAPABILITIES=all \
-  --env ACCEPT_EULA=Y \
+  --env PYTHONUNBUFFERED=1 \
   --env PYTHONDONTWRITEBYTECODE=1 \
   "${CONTAINER_IMAGE}" \
-  bash -c "unset PYTHONHOME; \
-           export PATH=/usr/bin:/usr/local/bin:\$PATH; \
-           export LD_LIBRARY_PATH=/usr/lib:/usr/local/lib:\$LD_LIBRARY_PATH; \
-           wandb login e69097b8c1bd646d9218e652823487632097445d && \
+  bash -c "export PYTHONPATH=/root/mpinets:\$PYTHONPATH && \
+           git config --global --add safe.directory /root/mpinets && \
            cd /root/mpinets && \
-           python3 -B -m pip install --no-compile -e . && \
-           python3 -B /root/mpinets/mpinets/run_training.py /root/mpinets/train_configs/pretrain.yaml"
-
-echo "=== Completed ==="
+           python3 mpinets/mpinets/run_training.py mpinets/train_configs/pretrain.yaml"
