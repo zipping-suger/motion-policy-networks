@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # run_singularity.sh
-# Modified version with bytecode corruption prevention
+# Optimized version with precise bytecode cleanup
 
 set -euo pipefail
 
@@ -13,12 +13,12 @@ CHECKPOINT_DIR="/cluster/home/yixili/motion-policy-networks/checkpoints"
 
 echo "Starting Singularity container: $CONTAINER_IMAGE"
 
-# --- Clean Python bytecode caches ---
-echo "Cleaning Python bytecode caches..."
+# --- Targeted Python bytecode cleanup ---
+echo "Cleaning Python 3.7 bytecode caches..."
 singularity exec --writable-tmpfs "$CONTAINER_IMAGE" \
-  find /usr -name "*.pyc" -delete
+  find /usr/lib/python3.7 -name "*.pyc" -delete 2>/dev/null || true
 
-# --- Run Singularity with bytecode prevention ---
+# --- Execute with bytecode prevention ---
 singularity exec \
   --nv \
   --containall --writable-tmpfs \
@@ -29,12 +29,12 @@ singularity exec \
   --env PYTHONPATH="/root/mpinets:\${PYTHONPATH:-}" \
   --env NVIDIA_DRIVER_CAPABILITIES=all \
   --env ACCEPT_EULA=Y \
-  --env PYTHONDONTWRITEBYTECODE=1 \  # Prevents new .pyc creation
+  --env PYTHONDONTWRITEBYTECODE=1 \
   "${CONTAINER_IMAGE}" \
   bash -c "wandb login e69097b8c1bd646d9218e652823487632097445d && \
            cd /root/mpinets && \
-           python -B -m pip install -e . && \  # -B prevents bytecode
+           python3 -B -m pip install --no-compile -e . && \
            cd / && \
-           python -B /root/mpinets/mpinets/run_training.py /root/mpinets/train_configs/pretrain.yaml"
+           python3 -B /root/mpinets/mpinets/run_training.py /root/mpinets/train_configs/pretrain.yaml"
 
 echo "=== Completed ==="
