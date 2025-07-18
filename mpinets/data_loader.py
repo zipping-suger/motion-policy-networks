@@ -638,11 +638,15 @@ class PointCloudInstanceDataset(PointCloudBase):
         )
 
         with h5py.File(str(self._database), "r") as f:
-            item["supervision"] = self.normalize(
+            supervision = self.normalize(
                 torch.as_tensor(
                     f[self.trajectory_key][trajectory_idx, supervision_timestep, :]
                 )
             ).float()
+            if torch.any(supervision < -1) or torch.any(supervision > 1):
+                print("Supervision out of bounds:", supervision)
+            supervision = torch.clamp(supervision, -1, 1)
+            item["supervision"] = supervision
 
         return item
 
