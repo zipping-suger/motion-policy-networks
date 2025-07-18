@@ -25,6 +25,10 @@ singularity exec \
   --env NVIDIA_DRIVER_CAPABILITIES=all \
   --env ACCEPT_EULA=Y \
   "${CONTAINER_IMAGE}" \
-  bash -c "wandb login e69097b8c1bd646d9218e652823487632097445d && python3 /root/mpinets/mpinets/run_training.py /root/mpinets/train_configs/pretrain.yaml"
+  bash -c "wandb login e69097b8c1bd646d9218e652823487632097445d && \
+           cd /root/mpinets && \
+           pip install -e . && \
+           cd / && \
+           python3 /root/mpinets/mpinets/run_training.py /root/mpinets/train_configs/pretrain.yaml"
 
 echo "=== Completed ==="
