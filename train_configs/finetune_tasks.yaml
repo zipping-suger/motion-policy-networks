@@ -15,10 +15,10 @@ shared_parameters:
     num_robot_points: 2048
 
 model_path: /workspace/mpinets_hybrid_expert.ckpt
-checkpoint_interval: 10
+checkpoint_interval: 2
 validation_interval: 4
 gpus: 1 # If > 1, will use DDP for training.
 batch_size: 32
-save_checkpoint_dir: /workspace/mpinets_pretrain
+save_checkpoint_dir: /workspace/mpinets_finetune_tasks
 experiment_name: finetune_tasks
 description: "Using tasks dataset for finetuning, no expert is provided."
