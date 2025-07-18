@@ -21,8 +21,8 @@ singularity exec \
   --bind "${DATA_DIR}:/data" \
   --bind "${CHECKPOINT_DIR}:/workspace" \
   --env PYTHONUNBUFFERED=1 \
-  --env PYTHONPATH="/root/mpinets" \  # Explicitly set only your code path
-  --env PYTHONHOME="" \               # Critical: Unset PYTHONHOME
+  --env PYTHONPATH="/root/mpinets" \  
+  --env PYTHONHOME="" \              
   --env NVIDIA_DRIVER_CAPABILITIES=all \
   --env ACCEPT_EULA=Y \
   --env PYTHONDONTWRITEBYTECODE=1 \
