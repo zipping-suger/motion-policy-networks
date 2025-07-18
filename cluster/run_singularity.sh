@@ -30,4 +30,4 @@ singularity exec \
            git config --global --add safe.directory /root/mpinets && \
            cd /root/mpinets && \
            wandb login e69097b8c1bd646d9218e652823487632097445d && \
-           python3 -B /root/mpinets/mpinets/run_training.py /root/mpinets/train_configs/pretrain.yaml"
+           python3 -B /root/mpinets/mpinets/run_training.py /root/mpinets/train_configs/finetune_tasks.yaml"
