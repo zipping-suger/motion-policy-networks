@@ -13,7 +13,7 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: null
+model_path: /workspace/mpinets_pretrain/kcdonsqu/last.ckpt
 checkpoint_interval: 10
 validation_interval: 3000
 gpus: 1 # If > 1, will use DDP for training.
