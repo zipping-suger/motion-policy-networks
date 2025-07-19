@@ -43,6 +43,13 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         # The point cloud encoder does not need to be trained
         for params in self.point_cloud_encoder.parameters():
             params.requires_grad = False
+            
+    def configure_optimizers(self):
+        """
+        A standard method in PyTorch lightning to set the optimizer
+        """
+        optimizer = torch.optim.Adam(self.parameters(), lr=2e-5)
+        return optimizer
         
     def rollout(
         self,
