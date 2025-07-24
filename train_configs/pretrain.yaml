@@ -5,7 +5,7 @@ training_model_parameters:
     collision_loss_weight: 5
 
 data_module_parameters:
-  data_dir: /data/ompl_cubby_6k
+  data_dir: /data/ompl_free_8k
   trajectory_key: 'global_solutions' # Could also use 'global_solutions' for the global expert
   num_obstacle_points: 4096
   num_target_points: 128
@@ -13,11 +13,11 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: /workspace/mpinets_pretrain/rx9aw8sr/last.ckpt
+model_path: null
 checkpoint_interval: 10
 validation_interval: 3000
 gpus: 1 # If > 1, will use DDP for training.
 batch_size: 16
-save_checkpoint_dir: /workspace/mpinets_pretrain
-experiment_name: pretrain_cubby_6k
-description: "Pretraining on the cubby dataset with 6k trajectories."
+save_checkpoint_dir: /workspace/mpinets_pretrain/free_8k
+experiment_name: pretrain_free_8k
+description: "Pretraining on the free space dataset with 8k trajectories."

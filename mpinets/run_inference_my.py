@@ -38,7 +38,7 @@ import argparse
 
 import torch
 from robofin.pointcloud.torch import FrankaSampler
-from mpinets.model import MotionPolicyNetwork
+from mpinets.policynet import PolicyNet
 from mpinets.geometry import construct_mixed_point_cloud
 from mpinets.utils import normalize_franka_joints, unnormalize_franka_joints
 from mpinets.metrics import Evaluator
@@ -46,6 +46,7 @@ from mpinets.mpinets_types import PlanningProblem, ProblemSet
 import trimesh
 import meshcat
 import urchin
+
 
 END_EFFECTOR_FRAME = "right_gripper"
 NUM_ROBOT_POINTS = 2048
@@ -134,7 +135,7 @@ def make_point_cloud_from_primitives(
 
 
 def rollout_until_success(
-    mdl: MotionPolicyNetwork,
+    mdl: PolicyNet,
     q0: np.ndarray,
     target: SE3,
     point_cloud: torch.Tensor,
@@ -156,20 +157,25 @@ def rollout_until_success(
     :rtype np.ndarray: The trajectory
     """
     q = torch.as_tensor(q0).unsqueeze(0).float().cuda()
+    
+    target_position = torch.as_tensor(target.matrix[:3, 3], dtype=torch.float32)
+    # Use rotation matrix R9 as rotation representation
+    target_rot_mat = torch.as_tensor(target.matrix[:3, :3].flatten(), dtype=torch.float32)
+    target_pose_input = torch.cat((target_position, target_rot_mat), dim=0).float().unsqueeze(0).to(q.device)
+    
     assert q.ndim == 2
     # This block is to adapt for the case where we only want to roll out a
     # single trajectory
     trajectory = [q]
-    q_norm = normalize_franka_joints(q)
-    assert isinstance(q_norm, torch.Tensor)
+    assert isinstance(q, torch.Tensor)
     success = False
 
     def sampler(config):
         return fk_sampler.sample(config, NUM_ROBOT_POINTS)
 
     for i in range(MAX_ROLLOUT_LENGTH):
-        q_norm = torch.clamp(q_norm + mdl(point_cloud, q_norm), min=-1, max=1)
-        qt = unnormalize_franka_joints(q_norm)
+        q = q + mdl(point_cloud, q, target_pose_input)
+        qt = q
         assert isinstance(qt, torch.Tensor)
         trajectory.append(qt)
         eff_pose = FrankaRobot.fk(
@@ -258,7 +264,7 @@ def convert_primitive_problems_to_depth(problems: ProblemSet):
 
 @torch.no_grad()
 def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
-    mdl = MotionPolicyNetwork.load_from_checkpoint(mdl_path).cuda()
+    mdl = PolicyNet.load_from_checkpoint(mdl_path).cuda()
     mdl.eval()
     cpu_fk_sampler = FrankaSampler("cpu", use_cache=True)
     gpu_fk_sampler = FrankaSampler("cuda:0", use_cache=True)
@@ -314,7 +320,7 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
     :param mdl_path str: The path to the model
     :param problems List[PlanningProblem]: A list of problems
     """
-    mdl = MotionPolicyNetwork.load_from_checkpoint(mdl_path).cuda()
+    mdl = PolicyNet.load_from_checkpoint(mdl_path).cuda()
     mdl.eval()
     cpu_fk_sampler = FrankaSampler("cpu", use_cache=True)
     gpu_fk_sampler = FrankaSampler("cuda:0", use_cache=True)
@@ -455,17 +461,13 @@ if __name__ == "__main__":
             " much faster because the trajectories are not displayed"
         ),
     )
-    parser.add_argument(
-        "--num-visualize",
-        type=int,
-        default=None,
-        help="Number of problems to visualize (default: all)",
-    )
     args = parser.parse_args()
     with open(args.problems, "rb") as f:
         problems = pickle.load(f)
     env_type = args.environment_type.replace("-", "_")
     problem_type = args.problem_type.replace("-", "_")
+    
+    print("THIS IS MY MODEL!")
     if env_type != "all":
         problems = {env_type: problems[env_type]}
     if problem_type != "all":
@@ -476,10 +478,4 @@ if __name__ == "__main__":
     if args.skip_visuals:
         calculate_metrics(args.mdl_path, problems)
     else:
-        # Limit the number of problems for visualization
-        if args.num_visualize is not None:
-            for env in problems:
-                for prob_type in problems[env]:
-                    problems[env][prob_type] = problems[env][prob_type][:args.num_visualize]
-        time.sleep(10)
         visualize_results(args.mdl_path, problems)
