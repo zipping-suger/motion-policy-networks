@@ -44,7 +44,7 @@ class MotionPolicyNetwork(pl.LightningModule):
         """
         super().__init__()
         self.point_cloud_encoder = MPiNetsPointNet()
-        self.feature_encoder = nn.Sequential(
+        self.config_encoder = nn.Sequential(
             nn.Linear(7, 32),
             nn.LeakyReLU(),
             nn.Linear(32, 64),
@@ -55,8 +55,19 @@ class MotionPolicyNetwork(pl.LightningModule):
             nn.LeakyReLU(),
             nn.Linear(128, 64),
         )
+        self.target_encoder = nn.Sequential(
+            nn.Linear(12, 32),  # 12 for pos + rotation matrix
+            nn.LeakyReLU(),
+            nn.Linear(32, 64),
+            nn.LeakyReLU(),
+            nn.Linear(64, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, 64),
+        )
         self.decoder = nn.Sequential(
-            nn.Linear(2048 + 64, 512),
+            nn.Linear(2048 + 64 + 64, 512),
             nn.LeakyReLU(),
             nn.Linear(512, 256),
             nn.LeakyReLU(),
@@ -72,7 +83,7 @@ class MotionPolicyNetwork(pl.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
         return optimizer
 
-    def forward(self, xyz: torch.Tensor, q: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+    def forward(self, xyz: torch.Tensor, q: torch.Tensor, target: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         """
         Passes data through the network to produce an output
 
@@ -86,8 +97,9 @@ class MotionPolicyNetwork(pl.LightningModule):
                      the position at the next step (still in normalized space)
         """
         pc_encoding = self.point_cloud_encoder(xyz)
-        feature_encoding = self.feature_encoder(q)
-        x = torch.cat((pc_encoding, feature_encoding), dim=1)
+        config_encoding = self.config_encoder(q)
+        target_encoding = self.target_encoder(target)
+        x = torch.cat((pc_encoding, config_encoding, target_encoding), dim=1)
         return self.decoder(x)
 
 
@@ -151,9 +163,10 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
                                    first element of each batch in the list would
                                    be a single trajectory.
         """
-        xyz, q = (
+        xyz, q, target_pose = (
             batch["xyz"],
             batch["configuration"],
+            batch["target_pose"]
         )
         # This block is to adapt for the case where we only want to roll out a
         # single trajectory
@@ -168,7 +181,7 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             trajectory = [q]
 
         for i in range(rollout_length):
-            q = torch.clamp(q + self(xyz, q), min=-1, max=1)
+            q = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
             q_unnorm = unnormalize_franka_joints(q)
             assert isinstance(q_unnorm, torch.Tensor)
             q_unnorm = q_unnorm.type_as(q)
@@ -195,48 +208,51 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         :param batch_idx int: The index of the batch (not used by this function)
         :rtype torch.Tensor: The overall weighted loss (used for backprop)
         """
-        xyz, q = (
+        xyz, q, target_pose = (
             batch["xyz"],
             batch["configuration"],
+            batch["target_pose"]
         )
-        y_hat = torch.clamp(q + self(xyz, q), min=-1, max=1)
-        (
-            cuboid_centers,
-            cuboid_dims,
-            cuboid_quats,
-            cylinder_centers,
-            cylinder_radii,
-            cylinder_heights,
-            cylinder_quats,
-            supervision,
-        ) = (
-            batch["cuboid_centers"],
-            batch["cuboid_dims"],
-            batch["cuboid_quats"],
-            batch["cylinder_centers"],
-            batch["cylinder_radii"],
-            batch["cylinder_heights"],
-            batch["cylinder_quats"],
-            batch["supervision"],
-        )
-        collision_loss, point_match_loss = self.loss_fun(
-            y_hat,
-            cuboid_centers,
-            cuboid_dims,
-            cuboid_quats,
-            cylinder_centers,
-            cylinder_radii,
-            cylinder_heights,
-            cylinder_quats,
-            supervision,
-        )
-        self.log("point_match_loss", point_match_loss)
-        self.log("collision_loss", collision_loss)
-        train_loss = (
-            self.point_match_loss_weight * point_match_loss
-            + self.collision_loss_weight * collision_loss
-        )
+        y_hat = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
+        train_loss = nn.MSELoss()(y_hat, q)
         self.log("train_loss", train_loss)
+        # (
+        #     cuboid_centers,
+        #     cuboid_dims,
+        #     cuboid_quats,
+        #     cylinder_centers,
+        #     cylinder_radii,
+        #     cylinder_heights,
+        #     cylinder_quats,
+        #     supervision,
+        # ) = (
+        #     batch["cuboid_centers"],
+        #     batch["cuboid_dims"],
+        #     batch["cuboid_quats"],
+        #     batch["cylinder_centers"],
+        #     batch["cylinder_radii"],
+        #     batch["cylinder_heights"],
+        #     batch["cylinder_quats"],
+        #     batch["supervision"],
+        # )
+        # collision_loss, point_match_loss = self.loss_fun(
+        #     y_hat,
+        #     cuboid_centers,
+        #     cuboid_dims,
+        #     cuboid_quats,
+        #     cylinder_centers,
+        #     cylinder_radii,
+        #     cylinder_heights,
+        #     cylinder_quats,
+        #     supervision,
+        # )
+        # self.log("point_match_loss", point_match_loss)
+        # self.log("collision_loss", collision_loss)
+        # train_loss = (
+        #     self.point_match_loss_weight * point_match_loss
+        #     + self.collision_loss_weight * collision_loss
+        # )
+        # self.log("train_loss", train_loss)
         return train_loss
 
     def sample(self, q: torch.Tensor) -> torch.Tensor:

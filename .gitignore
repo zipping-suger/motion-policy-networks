@@ -171,3 +171,5 @@ checkpoints/
 
 # everything under problems
 problems/
+
+.vscode/    

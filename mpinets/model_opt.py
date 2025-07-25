@@ -13,7 +13,7 @@ from robofin.robots import FrankaRealRobot
 from loss import compute_pose_loss_rotmat, collision_loss
 
 
-ROLLOUT_LENGTH = 49  # The trajectory length will be ROLLOUT_LENGTH + 1
+ROLLOUT_LENGTH = 69  # The trajectory length will be ROLLOUT_LENGTH + 1
 
 
 class MotionPolicyNetwork(pl.LightningModule):
@@ -28,7 +28,7 @@ class MotionPolicyNetwork(pl.LightningModule):
         """
         super().__init__()
         self.point_cloud_encoder = MPiNetsPointNet()
-        self.feature_encoder = nn.Sequential(
+        self.config_encoder = nn.Sequential(
             nn.Linear(7, 32),
             nn.LeakyReLU(),
             nn.Linear(32, 64),
@@ -39,8 +39,19 @@ class MotionPolicyNetwork(pl.LightningModule):
             nn.LeakyReLU(),
             nn.Linear(128, 64),
         )
+        self.target_encoder = nn.Sequential(
+            nn.Linear(12, 32),  # 12 for pos + rotation matrix
+            nn.LeakyReLU(),
+            nn.Linear(32, 64),
+            nn.LeakyReLU(),
+            nn.Linear(64, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, 64),
+        )
         self.decoder = nn.Sequential(
-            nn.Linear(2048 + 64, 512),
+            nn.Linear(2048 + 64 + 64, 512),
             nn.LeakyReLU(),
             nn.Linear(512, 256),
             nn.LeakyReLU(),
@@ -56,7 +67,7 @@ class MotionPolicyNetwork(pl.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
         return optimizer
 
-    def forward(self, xyz: torch.Tensor, q: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+    def forward(self, xyz: torch.Tensor, q: torch.Tensor, target: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         """
         Passes data through the network to produce an output
 
@@ -70,8 +81,9 @@ class MotionPolicyNetwork(pl.LightningModule):
                      the position at the next step (still in normalized space)
         """
         pc_encoding = self.point_cloud_encoder(xyz)
-        feature_encoding = self.feature_encoder(q)
-        x = torch.cat((pc_encoding, feature_encoding), dim=1)
+        config_encoding = self.config_encoder(q)
+        target_encoding = self.target_encoder(target)
+        x = torch.cat((pc_encoding, config_encoding, target_encoding), dim=1)
         return self.decoder(x)
 
 
@@ -118,9 +130,10 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         unnormalize: bool = True,
     ) -> List[torch.Tensor]:
         
-        xyz, q = (
+        xyz, q, target_pose = (
             batch["xyz"],
             batch["configuration"],
+            batch["target_pose"]
         )
         
         if q.ndim == 1:
@@ -134,7 +147,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             trajectory = [q]
 
         for i in range(rollout_length):
-            q = torch.clamp(q + self(xyz, q), min=-1, max=1)
+            q = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
             q_unnorm = unnormalize_franka_joints(q)
             assert isinstance(q_unnorm, torch.Tensor)
             q_unnorm = q_unnorm.type_as(q)
