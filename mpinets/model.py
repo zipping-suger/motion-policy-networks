@@ -67,7 +67,7 @@ class MotionPolicyNetwork(pl.LightningModule):
             nn.Linear(128, 64),
         )
         self.decoder = nn.Sequential(
-            nn.Linear(2048 + 64 + 64, 512),
+            nn.Linear(1024 + 64 + 64, 512),
             nn.LeakyReLU(),
             nn.Linear(512, 256),
             nn.LeakyReLU(),
@@ -214,45 +214,43 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             batch["target_pose"]
         )
         y_hat = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
-        train_loss = nn.MSELoss()(y_hat, q)
+        (
+            cuboid_centers,
+            cuboid_dims,
+            cuboid_quats,
+            cylinder_centers,
+            cylinder_radii,
+            cylinder_heights,
+            cylinder_quats,
+            supervision,
+        ) = (
+            batch["cuboid_centers"],
+            batch["cuboid_dims"],
+            batch["cuboid_quats"],
+            batch["cylinder_centers"],
+            batch["cylinder_radii"],
+            batch["cylinder_heights"],
+            batch["cylinder_quats"],
+            batch["supervision"],
+        )
+        collision_loss, point_match_loss = self.loss_fun(
+            y_hat,
+            cuboid_centers,
+            cuboid_dims,
+            cuboid_quats,
+            cylinder_centers,
+            cylinder_radii,
+            cylinder_heights,
+            cylinder_quats,
+            supervision,
+        )
+        self.log("point_match_loss", point_match_loss)
+        self.log("collision_loss", collision_loss)
+        train_loss = (
+            self.point_match_loss_weight * point_match_loss
+            + self.collision_loss_weight * collision_loss
+        )
         self.log("train_loss", train_loss)
-        # (
-        #     cuboid_centers,
-        #     cuboid_dims,
-        #     cuboid_quats,
-        #     cylinder_centers,
-        #     cylinder_radii,
-        #     cylinder_heights,
-        #     cylinder_quats,
-        #     supervision,
-        # ) = (
-        #     batch["cuboid_centers"],
-        #     batch["cuboid_dims"],
-        #     batch["cuboid_quats"],
-        #     batch["cylinder_centers"],
-        #     batch["cylinder_radii"],
-        #     batch["cylinder_heights"],
-        #     batch["cylinder_quats"],
-        #     batch["supervision"],
-        # )
-        # collision_loss, point_match_loss = self.loss_fun(
-        #     y_hat,
-        #     cuboid_centers,
-        #     cuboid_dims,
-        #     cuboid_quats,
-        #     cylinder_centers,
-        #     cylinder_radii,
-        #     cylinder_heights,
-        #     cylinder_quats,
-        #     supervision,
-        # )
-        # self.log("point_match_loss", point_match_loss)
-        # self.log("collision_loss", collision_loss)
-        # train_loss = (
-        #     self.point_match_loss_weight * point_match_loss
-        #     + self.collision_loss_weight * collision_loss
-        # )
-        # self.log("train_loss", train_loss)
         return train_loss
 
     def sample(self, q: torch.Tensor) -> torch.Tensor:
@@ -369,6 +367,7 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
 
 
 class MPiNetsPointNet(pl.LightningModule):
+
     def __init__(self):
         super().__init__()
         self._build_model()
@@ -378,65 +377,62 @@ class MPiNetsPointNet(pl.LightningModule):
         Assembles the model design into a ModuleList
         """
         self.SA_modules = nn.ModuleList()
+
+        # 1st SA: 128 points, radius .05, 64 neighbours, [1→64→64→64]
         self.SA_modules.append(
             PointnetSAModule(
-                npoint=512,
+                npoint=128,
                 radius=0.05,
-                nsample=128,
+                nsample=64,
                 mlp=[1, 64, 64, 64],
                 bn=False,
             )
         )
+
+        # 2nd SA: 64 points, radius .3, 64 neighbours, [64→128→128→256]
         self.SA_modules.append(
             PointnetSAModule(
-                npoint=128,
+                npoint=64,
                 radius=0.3,
-                nsample=128,
+                nsample=64,
                 mlp=[64, 128, 128, 256],
                 bn=False,
             )
         )
-        self.SA_modules.append(PointnetSAModule(mlp=[256, 512, 512, 1024], bn=False))
 
+        # 3rd SA (global): no npoint, 64 neighbours, [256→512→512]
+        self.SA_modules.append(
+            PointnetSAModule(
+                nsample=64,
+                mlp=[256, 512, 512],
+                bn=False,
+            )
+        )
+
+        # FC head: 512→2048→1024→1024 with GroupNorm + LeakyReLU
         self.fc_layer = nn.Sequential(
-            nn.Linear(1024, 4096),
-            nn.GroupNorm(16, 4096),
-            nn.LeakyReLU(inplace=True),
-            nn.Linear(4096, 2048),
+            nn.Linear(512, 2048),
             nn.GroupNorm(16, 2048),
             nn.LeakyReLU(inplace=True),
-            nn.Linear(2048, 2048),
+
+            nn.Linear(2048, 1024),
+            nn.GroupNorm(16, 1024),
+            nn.LeakyReLU(inplace=True),
+
+            nn.Linear(1024, 1024),
         )
 
     @staticmethod
     def _break_up_pc(pc: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Breaks up the point cloud into the xyz coordinates and segmentation mask
-
-        :param pc torch.Tensor: Tensor with shape [B, N, M] where M is larger than 3.
-                                The first three dimensions along the last axis will be x, y, z
-        :rtype Tuple[torch.Tensor, torch.Tensor]: Two tensors, one with just xyz
-            and one with the corresponding features
-        """
         xyz = pc[..., 0:3].contiguous()
         features = pc[..., 3:].transpose(1, 2).contiguous()
         return xyz, features
 
-    def forward(self, point_cloud: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
-        """
-        Forward pass of the network
-
-        :param point_cloud torch.Tensor: Has dimensions (B, N, 4)
-                                              B is the batch size
-                                              N is the number of points
-                                              4 is x, y, z, segmentation_mask
-                                              This tensor must be on the GPU (CPU tensors not supported)
-        :rtype torch.Tensor: The output from the network
-        """
+    def forward(self, point_cloud: torch.Tensor) -> torch.Tensor:
         assert point_cloud.size(2) == 4
         xyz, features = self._break_up_pc(point_cloud)
-
         for module in self.SA_modules:
             xyz, features = module(xyz, features)
-
+        # features: [B, C, 1]  → squeeze → [B, C]
         return self.fc_layer(features.squeeze(-1))
+
