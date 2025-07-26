@@ -19,6 +19,6 @@ checkpoint_interval: 10
 validation_interval: 10
 gpus: 4 # If > 1, will use DDP for training.
 batch_size: 64
-save_checkpoint_dir: /workspace/mpinets_finetune_table_6k_downsized_pointnet2
+save_checkpoint_dir: /workspace/mpinets_pretrain/mpinets_finetune_table_6k_downsized_pointnet2
 experiment_name: finetune_table_6k_downsized_pointnet2
 description: "finetune training"
