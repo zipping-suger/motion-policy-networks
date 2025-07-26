@@ -51,7 +51,7 @@ class MotionPolicyNetwork(pl.LightningModule):
             nn.Linear(128, 64),
         )
         self.decoder = nn.Sequential(
-            nn.Linear(2048 + 64 + 64, 512),
+            nn.Linear(1024 + 64 + 64, 512),
             nn.LeakyReLU(),
             nn.Linear(512, 256),
             nn.LeakyReLU(),
