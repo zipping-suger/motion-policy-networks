@@ -5,7 +5,7 @@ training_model_parameters:
     collision_loss_weight: 10
 
 data_module_parameters:
-  data_dir: /data/ompl_table_6k
+  data_dir: /data/ompl_cubby_6k
   trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
@@ -14,11 +14,11 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: /workspace/mpinets_pretrain/table_6k_downsized_pointnet2_mse/rvay12gu/last.ckpt
+model_path: /workspace/mpinets_pretrain/cubby_6k_downsized_pointnet2/k7dp40dr/last.ckpt
 checkpoint_interval: 10
 validation_interval: 10
 gpus: 4 # If > 1, will use DDP for training.
 batch_size: 64
-save_checkpoint_dir: /workspace/mpinets_finetune_table_6k_downsized_pointnet2_mse
-experiment_name: finetune_table_6k_downsized_pointnet2_mse
+save_checkpoint_dir: /workspace/mpinets_finetune_cubby_6k_downsized_pointnet2
+experiment_name: finetune_cubby_6k_downsized_pointnet2
 description: "finetune training"
