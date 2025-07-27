@@ -242,6 +242,28 @@ if __name__ == "__main__":
                 device="cuda:0"
             ).unsqueeze(0)
             q_norm = normalize_franka_joints(current_q)
+            
+            
+            # Construct target points
+            target_pose_mat = torch.tensor(
+                target_pose.matrix,
+                dtype=torch.float32,
+                device="cuda:0"
+            ).unsqueeze(0)
+            target_points = gpu_fk_sampler.sample_end_effector(
+                target_pose_mat,
+                NUM_TARGET_POINTS
+            ).squeeze(0)
+
+            # Construct the target pose input for the model
+            target_position = torch.as_tensor(
+                target_pose.matrix[:3, 3], dtype=torch.float32
+            )
+            # Use rotation matrix R9 as rotation representation
+            target_rot_mat = torch.as_tensor(
+                target_pose.matrix[:3, :3].flatten(), dtype=torch.float32
+            )
+            target_pose_input = torch.cat((target_position, target_rot_mat), dim=0).float().unsqueeze(0).to(q.device)
 
             trajectory = []
             trajectory.append(start_config.copy())
@@ -253,16 +275,6 @@ if __name__ == "__main__":
                     NUM_ROBOT_POINTS
                 ).squeeze(0)
 
-                target_pose_mat = torch.tensor(
-                    target_pose.matrix,
-                    dtype=torch.float32,
-                    device="cuda:0"
-                ).unsqueeze(0)
-                target_points = gpu_fk_sampler.sample_end_effector(
-                    target_pose_mat,
-                    NUM_TARGET_POINTS
-                ).squeeze(0)
-
                 # Create point cloud
                 xyz = create_point_cloud(
                     robot_points,
@@ -271,7 +283,7 @@ if __name__ == "__main__":
                 )
 
                 # Policy prediction
-                delta_q = model(xyz, q_norm)
+                delta_q = model(xyz, q_norm, target_pose_input)
                 q_norm = torch.clamp(q_norm + delta_q, min=-1, max=1)
                 current_q = unnormalize_franka_joints(q_norm)
                 current_config = current_q.squeeze(0).detach().cpu().numpy()
