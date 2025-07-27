@@ -10,8 +10,7 @@ from mpinets.geometry import TorchCuboids, TorchCylinders
 from typing import List, Tuple, Sequence, Dict, Callable
 from mpinets.model import MPiNetsPointNet
 from robofin.robots import FrankaRealRobot
-from loss import compute_pose_loss_rotmat, collision_loss, point_match_loss
-
+from loss import compute_pose_loss_rotmat, collision_loss
 
 ROLLOUT_LENGTH = 69  # The trajectory length will be ROLLOUT_LENGTH + 1
 
@@ -23,9 +22,6 @@ class MotionPolicyNetwork(pl.LightningModule):
     """
 
     def __init__(self):
-        """
-        Constructs the model
-        """
         super().__init__()
         self.point_cloud_encoder = MPiNetsPointNet()
         self.config_encoder = nn.Sequential(
@@ -61,25 +57,12 @@ class MotionPolicyNetwork(pl.LightningModule):
         )
 
     def configure_optimizers(self):
-        """
-        A standard method in PyTorch lightning to set the optimizer
-        """
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
         return optimizer
 
-    def forward(self, xyz: torch.Tensor, q: torch.Tensor, target: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
-        """
-        Passes data through the network to produce an output
-
-        :param xyz torch.Tensor: Tensor representing the point cloud. Should
-                                      have dimensions of [B x N x 4] where B is the batch
-                                      size, N is the number of points and 4 is because there
-                                      are three geometric dimensions and a segmentation mask
-        :param q torch.Tensor: The current robot configuration normalized to be between
-                                    -1 and 1, according to each joint's range of motion
-        :rtype torch.Tensor: The displacement to be applied to the current configuration to get
-                     the position at the next step (still in normalized space)
-        """
+    def forward(
+        self, xyz: torch.Tensor, q: torch.Tensor, target: torch.Tensor
+    ) -> torch.Tensor:
         pc_encoding = self.point_cloud_encoder(xyz)
         config_encoding = self.config_encoder(q)
         target_encoding = self.target_encoder(target)
@@ -94,33 +77,27 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         goal_loss_weight: float,
         collision_loss_weight: float,
     ):
-        """
-        Creates the network and assigns additional parameters for training
-
-
-        :param num_robot_points int: The number of robot points used when resampling
-                                     the robot points during rollouts (used in validation)
-        :rtype Self: An instance of the network
-        """
-        super().__init__()            
+        super().__init__()
         self.num_robot_points = num_robot_points
         self.fk_sampler = None
         self.collision_sampler = None
         self.goal_loss_weight = goal_loss_weight
         self.collision_loss_weight = collision_loss_weight
-        self.mse_loss = nn.MSELoss()
         self.validation_step_outputs = []
 
-        # The point cloud encoder does not need to be trained
+        # Freeze point cloud encoder
         for params in self.point_cloud_encoder.parameters():
             params.requires_grad = False
 
     def configure_optimizers(self):
-        """
-        A standard method in PyTorch lightning to set the optimizer
-        """
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
         return optimizer
+
+    def on_before_optimizer_step(self, optimizer, optimizer_idx=None):
+        """
+        PyTorch Lightning hook: clip gradients before optimizer step
+        """
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0, norm_type=2.0)
 
     def rollout(
         self,
@@ -133,7 +110,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         xyz, q, target_pose = (
             batch["xyz"],
             batch["configuration"],
-            batch["target_pose"]
+            batch["target_pose"],
         )
 
         if q.ndim == 1:
@@ -163,7 +140,9 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         return trajectory
 
     # Differentialble rollout evaluation function with repect to the rollout
-    def eval_rollout(self, rollout: List[torch.Tensor], batch: torch.Tensor) -> torch.Tensor:
+    def eval_rollout(
+        self, rollout: List[torch.Tensor], batch: torch.Tensor
+    ) -> torch.Tensor:
         """
         Evaluates a rollout by computing the difference between the last configuration
         in the rollout and the target configuration, and sums collision loss over the rollout.
@@ -174,31 +153,19 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         assert len(rollout) > 0, "Rollout must contain at least one configuration"
 
         # Goal reaching loss
-        last_configuration = rollout[-1]      
-        # Goal reaching loss in end-effector space
+        last_configuration = rollout[-1]
         # Goal reaching loss in end-effector space
         pred_pose = self.fk_sampler.end_effector_pose(last_configuration)  # (B,4,4)
         target_pose = batch[
             "target_pose"
         ]  # (B,12) [x, y, z, flattened rotation matrix]
 
-        # Reshape target_pose to (B, 4, 4) for FK sampler
-        # Assumes target_pose is [x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22]
-        B = target_pose.shape[0]
-        target_pose_matrix = torch.zeros(
-            (B, 4, 4), device=target_pose.device, dtype=target_pose.dtype
-        )
-        target_pose_matrix[:, :3, 3] = target_pose[:, :3]
-        target_pose_matrix[:, :3, :3] = target_pose[:, 3:].reshape(B, 3, 3)
-        target_pose_matrix[:, 3, 3] = 1.0
+        position_loss, rotation_loss = compute_pose_loss_rotmat(pred_pose, target_pose)
 
-        # Sample end-effector point cloud
-        pred_target_point_cloud = self.fk_sampler.sample_end_effector(pred_pose, 128)
-        target_point_cloud = self.fk_sampler.sample_end_effector(
-            target_pose_matrix, 128
-        )
-
-        goal_loss = point_match_loss(pred_target_point_cloud, target_point_cloud)
+        # Combine losses with balancing factor
+        goal_loss = torch.mean(
+            position_loss + 0.1 * rotation_loss
+        )  # Follow the rule of thumb, to make them roughly equal in scale
 
         # Collision loss over the entire rollout
         (
@@ -239,9 +206,18 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             )
             total_colli_loss += colli_loss
 
-        train_loss = self.goal_loss_weight * goal_loss + self.collision_loss_weight * total_colli_loss
+        train_loss = (
+            self.goal_loss_weight * goal_loss
+            + self.collision_loss_weight * total_colli_loss
+        )
 
-        return train_loss, goal_loss, total_colli_loss
+        return (
+            train_loss,
+            goal_loss,
+            total_colli_loss,
+            torch.mean(position_loss),
+            torch.mean(rotation_loss),
+        )
 
     def training_step(  # type: ignore[override]
         self, batch: Dict[str, torch.Tensor], batch_idx: int
@@ -255,7 +231,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
                                                    on the correct device
         :param batch_idx int: The index of the batch (not used by this function)
         :rtype torch.Tensor: The overall weighted loss (used for backprop)
-        """        
+        """
         # Rollout the trajectory
         if self.fk_sampler is None:
             self.fk_sampler = FrankaSampler(self.device, use_cache=True)
@@ -265,13 +241,15 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             )
         rollout = self.rollout(batch, ROLLOUT_LENGTH, self.sample)
 
-        train_loss, goal_loss, colli_loss = self.eval_rollout(
-            rollout, batch
+        train_loss, goal_loss, colli_loss, position_loss, rotation_loss = (
+            self.eval_rollout(rollout, batch)
         )
 
         self.log("train_loss", train_loss)
         self.log("goal_loss", goal_loss)
         self.log("colli_loss", colli_loss)
+        self.log("position_loss", position_loss)
+        self.log("rotation_loss", rotation_loss)
         return train_loss
 
     def sample(self, q: torch.Tensor) -> torch.Tensor:
@@ -332,7 +310,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             rollout = torch.stack(rollout, dim=1)
             # Here is some Pytorch broadcasting voodoo to calculate whether each
             # rollout has a collision or not (looking to calculate the collision rate)
-            assert rollout.shape == (B, ROLLOUT_LENGTH+1, 7)
+            assert rollout.shape == (B, ROLLOUT_LENGTH + 1, 7)
             rollout = rollout.reshape(-1, 7)
             has_collision = torch.zeros(B, dtype=torch.bool, device=self.device)
             collision_spheres = self.collision_sampler.compute_spheres(rollout)
@@ -343,7 +321,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
                     cuboids.sdf_sequence(sphere_sequence),
                     cylinders.sdf_sequence(sphere_sequence),
                 )
-                assert sdf_values.shape == (B, ROLLOUT_LENGTH+1, num_spheres)
+                assert sdf_values.shape == (B, ROLLOUT_LENGTH + 1, num_spheres)
                 radius_collisions = torch.any(
                     sdf_values.reshape((sdf_values.size(0), -1)) <= radius, dim=-1
                 )
