@@ -10,7 +10,7 @@ from mpinets.geometry import TorchCuboids, TorchCylinders
 from typing import List, Tuple, Sequence, Dict, Callable
 from mpinets.model import MPiNetsPointNet
 from robofin.robots import FrankaRealRobot
-from loss import compute_pose_loss_rotmat, collision_loss
+from loss import compute_pose_loss_rotmat, collision_loss, point_match_loss
 
 
 ROLLOUT_LENGTH = 69  # The trajectory length will be ROLLOUT_LENGTH + 1
@@ -110,18 +110,18 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         self.collision_loss_weight = collision_loss_weight
         self.mse_loss = nn.MSELoss()
         self.validation_step_outputs = []
-        
+
         # The point cloud encoder does not need to be trained
         for params in self.point_cloud_encoder.parameters():
             params.requires_grad = False
-            
+
     def configure_optimizers(self):
         """
         A standard method in PyTorch lightning to set the optimizer
         """
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
         return optimizer
-        
+
     def rollout(
         self,
         batch: Dict[str, torch.Tensor],
@@ -129,13 +129,13 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         sampler: Callable[[torch.Tensor], torch.Tensor],
         unnormalize: bool = True,
     ) -> List[torch.Tensor]:
-        
+
         xyz, q, target_pose = (
             batch["xyz"],
             batch["configuration"],
             batch["target_pose"]
         )
-        
+
         if q.ndim == 1:
             xyz = xyz.unsqueeze(0)
             q = q.unsqueeze(0)
@@ -155,13 +155,13 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
                 trajectory.append(q_unnorm)
             else:
                 trajectory.append(q)
-                
+
             with torch.no_grad():
                 samples = sampler(q_unnorm).type_as(xyz)
                 xyz[:, : samples.shape[1], :3] = samples
 
         return trajectory
-    
+
     # Differentialble rollout evaluation function with repect to the rollout
     def eval_rollout(self, rollout: List[torch.Tensor], batch: torch.Tensor) -> torch.Tensor:
         """
@@ -176,16 +176,30 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         # Goal reaching loss
         last_configuration = rollout[-1]      
         # Goal reaching loss in end-effector space
+        # Goal reaching loss in end-effector space
         pred_pose = self.fk_sampler.end_effector_pose(last_configuration)  # (B,4,4)
-        target_pose = batch["target_pose"]  # (B,12) [x, y, z, flattened rotation matrix]
+        target_pose = batch[
+            "target_pose"
+        ]  # (B,12) [x, y, z, flattened rotation matrix]
 
-        position_loss, rotation_loss = compute_pose_loss_rotmat(
-            pred_pose, target_pose
+        # Reshape target_pose to (B, 4, 4) for FK sampler
+        # Assumes target_pose is [x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22]
+        B = target_pose.shape[0]
+        target_pose_matrix = torch.zeros(
+            (B, 4, 4), device=target_pose.device, dtype=target_pose.dtype
+        )
+        target_pose_matrix[:, :3, 3] = target_pose[:, :3]
+        target_pose_matrix[:, :3, :3] = target_pose[:, 3:].reshape(B, 3, 3)
+        target_pose_matrix[:, 3, 3] = 1.0
+
+        # Sample end-effector point cloud
+        pred_target_point_cloud = self.fk_sampler.sample_end_effector(pred_pose, 128)
+        target_point_cloud = self.fk_sampler.sample_end_effector(
+            target_pose_matrix, 128
         )
 
-        # Combine losses with balancing factor
-        goal_loss = torch.mean(position_loss + 0.1 * rotation_loss) # Follow the rule of thumb, to make them roughly equal in scale
-        
+        goal_loss = point_match_loss(pred_target_point_cloud, target_point_cloud)
+
         # Collision loss over the entire rollout
         (
             cuboid_centers,
@@ -210,7 +224,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
         # Sum collision loss for each configuration in the rollout
         total_colli_loss = 0.0
-        
+
         for q in rollout:
             input_pc = self.fk_sampler.sample(q, self.num_robot_points)
             colli_loss = collision_loss(
@@ -224,10 +238,10 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
                 cylinder_quats,
             )
             total_colli_loss += colli_loss
-        
+
         train_loss = self.goal_loss_weight * goal_loss + self.collision_loss_weight * total_colli_loss
-    
-        return train_loss, goal_loss, total_colli_loss, torch.mean(position_loss), torch.mean(rotation_loss)
+
+        return train_loss, goal_loss, total_colli_loss
 
     def training_step(  # type: ignore[override]
         self, batch: Dict[str, torch.Tensor], batch_idx: int
@@ -250,16 +264,14 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
                 self.device, with_base_link=False
             )
         rollout = self.rollout(batch, ROLLOUT_LENGTH, self.sample)
-        
-        train_loss, goal_loss, colli_loss, position_loss, rotation_loss = self.eval_rollout(
+
+        train_loss, goal_loss, colli_loss = self.eval_rollout(
             rollout, batch
         )
-        
+
         self.log("train_loss", train_loss)
         self.log("goal_loss", goal_loss)
         self.log("colli_loss", colli_loss)
-        self.log("position_loss", position_loss)
-        self.log("rotation_loss", rotation_loss)
         return train_loss
 
     def sample(self, q: torch.Tensor) -> torch.Tensor:
@@ -286,7 +298,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
         # These are defined here because they need to be set on the correct devices.
         # The easiest way to do this is to do it at call-time
-        
+
         with torch.no_grad():
             if self.fk_sampler is None:
                 self.fk_sampler = FrankaSampler(self.device, use_cache=True)
@@ -297,7 +309,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             rollout = self.rollout(batch, ROLLOUT_LENGTH, self.sample)
 
             assert self.fk_sampler is not None  # Necessary for mypy to type properly
-            
+
             eff = self.fk_sampler.end_effector_pose(rollout[-1])
             position_error = torch.linalg.vector_norm(
                 eff[:, :3, -1] - batch["target_position"], dim=1
@@ -338,7 +350,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
                 has_collision = torch.logical_or(radius_collisions, has_collision)
 
             avg_collision_rate = torch.count_nonzero(has_collision) / B
-                        
+
             result = {
                 "avg_target_error": avg_target_error,
                 "avg_collision_rate": avg_collision_rate,
@@ -356,5 +368,5 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             torch.stack([x["avg_collision_rate"] for x in self.validation_step_outputs])
         )
         self.log("avg_collision_rate", avg_collision_rate)
-        
+
         self.validation_step_outputs.clear()
