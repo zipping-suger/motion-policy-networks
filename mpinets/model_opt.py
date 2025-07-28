@@ -116,15 +116,11 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             params.requires_grad = False
 
     def configure_optimizers(self):
+        """
+        A standard method in PyTorch lightning to set the optimizer
+        """
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
-        # Cosine annealing with warm restarts
-        scheduler = {
-            "scheduler": torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                optimizer, T_0=10, T_mult=2, eta_min=1e-6
-            ),
-            "interval": "epoch",
-        }
-        return [optimizer], [scheduler]
+        return optimizer
 
     def rollout(
         self,
@@ -152,6 +148,12 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
         for i in range(rollout_length):
             q = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
+
+            # Noise injection at each step for robustness
+            if self.training:
+                q = q + 0.015 * torch.randn_like(q)
+                q = torch.clamp(q, min=-1, max=1)
+
             q_unnorm = unnormalize_franka_joints(q)
             assert isinstance(q_unnorm, torch.Tensor)
             q_unnorm = q_unnorm.type_as(q)
