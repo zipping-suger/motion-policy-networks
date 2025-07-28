@@ -10,7 +10,7 @@ from mpinets.geometry import TorchCuboids, TorchCylinders
 from typing import List, Tuple, Sequence, Dict, Callable
 from mpinets.model import MPiNetsPointNet
 from robofin.robots import FrankaRealRobot
-from loss import collision_loss, point_match_loss
+from loss import compute_pose_loss_rotmat, collision_loss
 
 
 ROLLOUT_LENGTH = 69  # The trajectory length will be ROLLOUT_LENGTH + 1
@@ -148,6 +148,12 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
         for i in range(rollout_length):
             q = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
+
+            # Noise injection at each step for robustness
+            if self.training:
+                q = q + 0.015 * torch.randn_like(q)
+                q = torch.clamp(q, min=-1, max=1)
+
             q_unnorm = unnormalize_franka_joints(q)
             assert isinstance(q_unnorm, torch.Tensor)
             q_unnorm = q_unnorm.type_as(q)
@@ -178,29 +184,17 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         # Goal reaching loss
         last_configuration = rollout[-1]
         # Goal reaching loss in end-effector space
-        # Goal reaching loss in end-effector space
         pred_pose = self.fk_sampler.end_effector_pose(last_configuration)  # (B,4,4)
         target_pose = batch[
             "target_pose"
         ]  # (B,12) [x, y, z, flattened rotation matrix]
 
-        # Reshape target_pose to (B, 4, 4) for FK sampler
-        # Assumes target_pose is [x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22]
-        B = target_pose.shape[0]
-        target_pose_matrix = torch.zeros(
-            (B, 4, 4), device=target_pose.device, dtype=target_pose.dtype
-        )
-        target_pose_matrix[:, :3, 3] = target_pose[:, :3]
-        target_pose_matrix[:, :3, :3] = target_pose[:, 3:].reshape(B, 3, 3)
-        target_pose_matrix[:, 3, 3] = 1.0
+        position_loss, rotation_loss = compute_pose_loss_rotmat(pred_pose, target_pose)
 
-        # Sample end-effector point cloud
-        pred_target_point_cloud = self.fk_sampler.sample_end_effector(pred_pose, 128)
-        target_point_cloud = self.fk_sampler.sample_end_effector(
-            target_pose_matrix, 128
-        )
-
-        goal_loss = point_match_loss(pred_target_point_cloud, target_point_cloud)
+        # Combine losses with balancing factor
+        goal_loss = torch.mean(
+            position_loss + 0.1 * rotation_loss
+        )  # Follow the rule of thumb, to make them roughly equal in scale
 
         # Collision loss over the entire rollout
         (
@@ -246,7 +240,13 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             + self.collision_loss_weight * total_colli_loss
         )
 
-        return train_loss, goal_loss, total_colli_loss
+        return (
+            train_loss,
+            goal_loss,
+            total_colli_loss,
+            torch.mean(position_loss),
+            torch.mean(rotation_loss),
+        )
 
     def training_step(  # type: ignore[override]
         self, batch: Dict[str, torch.Tensor], batch_idx: int
@@ -270,11 +270,15 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             )
         rollout = self.rollout(batch, ROLLOUT_LENGTH, self.sample)
 
-        train_loss, goal_loss, colli_loss = self.eval_rollout(rollout, batch)
+        train_loss, goal_loss, colli_loss, position_loss, rotation_loss = (
+            self.eval_rollout(rollout, batch)
+        )
 
         self.log("train_loss", train_loss)
         self.log("goal_loss", goal_loss)
         self.log("colli_loss", colli_loss)
+        self.log("position_loss", position_loss)
+        self.log("rotation_loss", rotation_loss)
         return train_loss
 
     def sample(self, q: torch.Tensor) -> torch.Tensor:
