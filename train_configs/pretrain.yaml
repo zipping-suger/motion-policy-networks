@@ -5,8 +5,8 @@ training_model_parameters:
     collision_loss_weight: 5
 
 data_module_parameters:
-  data_dir: /data/ompl_table_6k
-  trajectory_key: 'global_solutions' # Could also use 'global_solutions' for the global expert
+  data_dir: /data/mpinets_hybrid_training_data_tiny
+  trajectory_key: 'hybrid_solutions' # Could also use 'global_solutions' for the global expert
   num_obstacle_points: 4096
   num_target_points: 128
   random_scale: 0.015
@@ -16,8 +16,8 @@ shared_parameters:
 model_path: null
 checkpoint_interval: 10
 validation_interval: 3000
-gpus: 1 # If > 1, will use DDP for training.
+gpus: 6 # If > 1, will use DDP for training.
 batch_size: 16
-save_checkpoint_dir: /workspace/mpinets_pretrain/table_6k_downsized_pointnet2_mse
-experiment_name: pretrain_table_6k_downsized_pointnet2_mse
-description: "Pretraining on the table dataset with downsized pointnet2 and MSE loss"
+save_checkpoint_dir: /workspace/pretrain_mpinets_hybrid_training_data_tiny
+experiment_name: pretrain_mpinets_hybrid_training_data_tiny
+description: "Use 3% of the mpinet data for pretrain"

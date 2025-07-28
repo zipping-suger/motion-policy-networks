@@ -5,8 +5,8 @@ training_model_parameters:
     collision_loss_weight: 10
 
 data_module_parameters:
-  data_dir: /data/ompl_cubby_6k
-  trajectory_key: 'global_solutions'
+  data_dir: /data/mpinets_hybrid_training_data_tiny
+  trajectory_key: 'hybrid_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
   random_scale: 0
@@ -14,11 +14,11 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: /workspace/mpinets_pretrain/cubby_6k_downsized_pointnet2_mse/oi7x64rx/last.ckpt
+model_path: null
 checkpoint_interval: 10
 validation_interval: 10
-gpus: 2 # If > 1, will use DDP for training.
+gpus: 6 # If > 1, will use DDP for training.
 batch_size: 64
-save_checkpoint_dir: /workspace/mpinets_finetune_cubby_6k_downsized_pointnet2_mse_pointmatch
-experiment_name: mpinets_finetune_cubby_6k_downsized_pointnet2_mse_pointmatch
-description: "finetune training"
+save_checkpoint_dir: /workspace/mpinets_finetune_mpinets_hybrid_training_data_tiny
+experiment_name: mpinets_finetune_mpinets_hybrid_training_data_tiny
+description: "finetune mpinets on hybrid solutions with 3% of the data"

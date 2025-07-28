@@ -214,47 +214,44 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             batch["target_pose"]
         )
         y_hat = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
-        supervision = batch["supervision"]
-        train_loss = nn.MSELoss()(y_hat, supervision)
-        self.log("train_loss", train_loss)
         
-        # (
-        #     cuboid_centers,
-        #     cuboid_dims,
-        #     cuboid_quats,
-        #     cylinder_centers,
-        #     cylinder_radii,
-        #     cylinder_heights,
-        #     cylinder_quats,
-        #     supervision,
-        # ) = (
-        #     batch["cuboid_centers"],
-        #     batch["cuboid_dims"],
-        #     batch["cuboid_quats"],
-        #     batch["cylinder_centers"],
-        #     batch["cylinder_radii"],
-        #     batch["cylinder_heights"],
-        #     batch["cylinder_quats"],
-        #     batch["supervision"],
-        # )
-        # collision_loss, point_match_loss = self.loss_fun(
-        #     y_hat,
-        #     cuboid_centers,
-        #     cuboid_dims,
-        #     cuboid_quats,
-        #     cylinder_centers,
-        #     cylinder_radii,
-        #     cylinder_heights,
-        #     cylinder_quats,
-        #     supervision,
-        # )
-        # self.log("point_match_loss", point_match_loss)
-        # self.log("collision_loss", collision_loss)
-        # train_loss = (
-        #     self.point_match_loss_weight * point_match_loss
-        #     + self.collision_loss_weight * collision_loss
-        # )
-        # self.log("train_loss", train_loss)
+        (
+            cuboid_centers,
+            cuboid_dims,
+            cuboid_quats,
+            cylinder_centers,
+            cylinder_radii,
+            cylinder_heights,
+            cylinder_quats,
+            supervision,
+        ) = (
+            batch["cuboid_centers"],
+            batch["cuboid_dims"],
+            batch["cuboid_quats"],
+            batch["cylinder_centers"],
+            batch["cylinder_radii"],
+            batch["cylinder_heights"],
+            batch["cylinder_quats"],
+            batch["supervision"],
+        )
+        collision_loss, point_match_loss = self.loss_fun(
+            y_hat,
+            cuboid_centers,
+            cuboid_dims,
+            cuboid_quats,
+            cylinder_centers,
+            cylinder_radii,
+            cylinder_heights,
+            cylinder_quats,
+            supervision,
+        )
+        self.log("point_match_loss", point_match_loss)
+        self.log("collision_loss", collision_loss)
+        train_loss = (
+            self.point_match_loss_weight * point_match_loss
+            + self.collision_loss_weight * collision_loss
+        )
+        self.log("train_loss", train_loss)
         return train_loss
 
     def sample(self, q: torch.Tensor) -> torch.Tensor:
