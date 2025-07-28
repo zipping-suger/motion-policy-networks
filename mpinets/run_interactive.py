@@ -263,7 +263,7 @@ if __name__ == "__main__":
             target_rot_mat = torch.as_tensor(
                 target_pose.matrix[:3, :3].flatten(), dtype=torch.float32
             )
-            target_pose_input = torch.cat((target_position, target_rot_mat), dim=0).float().unsqueeze(0).to(q.device)
+            target_pose_input = torch.cat((target_position, target_rot_mat), dim=0).float().unsqueeze(0).to(q_norm.device)
 
             trajectory = []
             trajectory.append(start_config.copy())
