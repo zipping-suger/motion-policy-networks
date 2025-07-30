@@ -128,7 +128,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "environment_type",
-        choices=["tabletop", "cubby", "merged-cubby", "dresser", "free", "all"],
+        choices=["tabletop", "cubby", "merged-cubby", "dresser", "free", "pillar", "all"],
         help="The environment class to filter problems by, or 'all' for all environments",
     )
     parser.add_argument(
