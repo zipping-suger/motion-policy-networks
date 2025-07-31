@@ -207,36 +207,47 @@ from mpinets.geometry import TorchCuboids, TorchCylinders
 from typing import List, Union
 from geometrout.primitive import Cuboid, Cylinder
 from geometrout.transform import SE3
+# Assuming loss.py contains compute_pose_loss_rotmat and collision_loss
 from loss import compute_pose_loss_rotmat, collision_loss
+
 
 def trajectory_opt_pointcld(
     trajectory_init: np.ndarray,
     target_pose: SE3,
-    obstacle_points: np.ndarray,  # [N, 3] numpy array of obstacle points
+    obstacle_points: np.ndarray,
     gpu_fk_sampler: FrankaSampler,
-    num_iterations: int = 35,
-    learning_rate: float = 1e-1,
+    num_iterations: int = 30,
+    learning_rate: float = 1e-3,
     goal_weight: float = 0.1,
+    position_weight: float = 5.0,  # New: separate weight for position
+    orientation_weight: float = 0.1,  # New: separate weight for orientation
     smoothness_weight: float = 1,
-    collision_weight: float = 10,
+    collision_weight: float = 20,
+    collision_threshold: float = 0.03,  # New: configurable collision threshold (3cm)
     num_robot_points: int = 512,
+    freeze_first_config: bool = True,  # New: option to freeze initial config
+    verbose: bool = False,
 ) -> np.ndarray:
     """
-    Optimizes a robot trajectory using gradient descent to minimize:
-    - Goal-reaching error (position + orientation)
-    - Trajectory smoothness (acceleration penalty)
-    - Collision with obstacles (using point cloud distance)
+    Optimizes a robot trajectory using gradient descent with enhanced features:
+    - Separate weights for position and orientation
+    - Configurable collision threshold
+    - Option to freeze initial configuration
+    - Improved timing and debugging
     """
-    import time
-    total_time = 0
-    setup_time = 0
-    goal_loss_time = 0
-    smooth_loss_time = 0
-    colli_loss_time = 0
-    backward_time = 0
-    step_time = 0
-
-    total_start = time.time()
+    # Timing diagnostics
+    timers = {
+        'total': 0,
+        'setup': 0,
+        'goal_loss': 0,
+        'smooth_loss': 0,
+        'collision_loss': 0,
+        'backward': 0,
+        'step': 0,
+        'fk': 0
+    }
+    
+    timers['total'] = time.time()
 
     # Convert to PyTorch tensor with gradient tracking
     trajectory = torch.tensor(
@@ -246,13 +257,13 @@ def trajectory_opt_pointcld(
     # Prepare target pose and obstacle points
     setup_start = time.time()
     with torch.no_grad():
-        # Target pose setup (same as primitive version)
+        # Target pose setup
         target_position = torch.as_tensor(
             target_pose.matrix[:3, 3], dtype=torch.float32, device="cuda"
         )
         target_rot_mat = torch.as_tensor(
-            target_pose.matrix[:3, :3].flatten(), dtype=torch.float32, device="cuda"
-        )
+            target_pose.matrix[:3, :3], dtype=torch.float32, device="cuda"
+        ).flatten()
         target_pose_input = torch.cat((target_position, target_rot_mat)).unsqueeze(0)
         
         # Prepare obstacle point cloud
@@ -260,102 +271,102 @@ def trajectory_opt_pointcld(
             obstacle_tensor = torch.tensor(
                 obstacle_points, dtype=torch.float32, device="cuda"
             )
-            # Expand to batch dimension [T, N, 3]
-            expanded_obstacle = obstacle_tensor.unsqueeze(0).repeat(
-                len(trajectory), 1, 1
+            # Expand to [T, N, 3] once (memory efficient)
+            expanded_obstacle = obstacle_tensor.unsqueeze(0).expand(
+                len(trajectory), -1, -1
             )
-            print(f"Obstacle points shape: {expanded_obstacle.shape}")
             has_obstacles = True
         else:
-            # Create dummy obstacle points to avoid runtime errors
             expanded_obstacle = torch.zeros(
                 (len(trajectory), 1, 3), dtype=torch.float32, device="cuda"
             )
             has_obstacles = False
 
-    setup_time = time.time() - setup_start
+    timers['setup'] = time.time() - setup_start
 
-    # Setup optimizer
-    optimizer = torch.optim.Adam([trajectory], lr=learning_rate)
+    # Setup optimizer with weight decay for better smoothness
+    optimizer = torch.optim.Adam([trajectory], lr=learning_rate, weight_decay=1e-4)
 
     for iteration in range(num_iterations):
         optimizer.zero_grad()
 
-        # 1. Goal-reaching loss
+        # 1. Goal-reaching loss (with separate position/orientation weights)
         goal_start = time.time()
+        fk_start = time.time()
         final_pose = gpu_fk_sampler.end_effector_pose(trajectory[-1:])
+        timers['fk'] += time.time() - fk_start
+        
         pos_loss, rot_loss = compute_pose_loss_rotmat(final_pose, target_pose_input)
-        goal_loss = pos_loss + 0.1 * rot_loss
-        goal_loss_time += time.time() - goal_start
+        goal_loss = position_weight * pos_loss + orientation_weight * rot_loss
+        timers['goal_loss'] += time.time() - goal_start
 
-        # 2. Smoothness loss
+        # 2. Smoothness loss (acceleration penalty)
         smooth_start = time.time()
         if len(trajectory) > 2:
+            # Finite difference acceleration
             acc = trajectory[:-2] - 2 * trajectory[1:-1] + trajectory[2:]
             smooth_loss = torch.mean(torch.sum(acc**2, dim=-1))
         else:
-            smooth_loss = torch.sum(trajectory * 0.0)
-        smooth_loss_time += time.time() - smooth_start
+            smooth_loss = torch.tensor(0.0, device="cuda")
+        timers['smooth_loss'] += time.time() - smooth_start
 
         # 3. Point cloud collision loss
         colli_start = time.time()
         input_pc = gpu_fk_sampler.sample(trajectory, num_robot_points)
         
         if has_obstacles:
-            # Calculate distance to nearest obstacle point
+            # Vectorized distance computation
             dists = torch.cdist(input_pc, expanded_obstacle)  # [T, M, N]
-            min_dists, _ = torch.min(dists, dim=2)  # [T, M]
+            min_dists = torch.min(dists, dim=2)[0]  # [T, M]
             
-            # Hinge loss: penalize points closer than 3cm to obstacles
-            colli_loss = torch.mean(torch.clamp(0.03 - min_dists, min=0))
+            # Hinge loss with configurable threshold
+            colli_loss = torch.mean(torch.clamp(collision_threshold - min_dists, min=0))
         else:
             colli_loss = torch.tensor(0.0, device="cuda")
-        
-        colli_loss_time += time.time() - colli_start
+        timers['collision_loss'] += time.time() - colli_start
 
         # Combined loss
         total_loss = (
-            goal_weight * goal_loss
-            + smoothness_weight * smooth_loss
-            + collision_weight * colli_loss
+            goal_weight * goal_loss +
+            smoothness_weight * smooth_loss +
+            collision_weight * colli_loss
         )
 
         # Backpropagation
         backward_start = time.time()
         total_loss.backward()
-        backward_time += time.time() - backward_start
+        timers['backward'] += time.time() - backward_start
 
-        # Zero out gradient for first configuration
-        with torch.no_grad():
-            if trajectory.grad is not None:
+        # Zero out gradient for first configuration if needed
+        if freeze_first_config and trajectory.grad is not None:
+            with torch.no_grad():
                 trajectory.grad[0].zero_()
 
         # Optimizer step
         step_start = time.time()
         optimizer.step()
-        step_time += time.time() - step_start
+        timers['step'] += time.time() - step_start
 
         # Progress reporting
-        if iteration % 10 == 0:
-            print(
-                f"Iter {iteration}: "
-                f"Goal={goal_loss.item():.4f}, "
-                f"Smooth={smooth_loss.item():.4f}, "
-                f"Colli={colli_loss.item():.4f}, "
-                f"Total={total_loss.item():.4f}"
-            )
+        if verbose and (iteration % 10 == 0 or iteration == num_iterations-1):
+            print(f"Iter {iteration}: "
+                  f"Pos={pos_loss.item():.4f}, "
+                  f"Rot={rot_loss.item():.4f}, "
+                  f"Smooth={smooth_loss.item():.4f}, "
+                  f"Colli={colli_loss.item():.4f}, "
+                  f"Total={total_loss.item():.4f}")
 
-    total_time = time.time() - total_start
+    timers['total'] = time.time() - timers['total']
 
-    # Print timing results
-    print("\nTiming Results:")
-    print(f"Total time: {total_time:.4f}s")
-    print(f"Setup time: {setup_time:.4f}s ({setup_time/total_time*100:.1f}%)")
-    print(f"Goal loss time: {goal_loss_time:.4f}s ({goal_loss_time/total_time*100:.1f}%)")
-    print(f"Smooth loss time: {smooth_loss_time:.4f}s ({smooth_loss_time/total_time*100:.1f}%)")
-    print(f"Collision loss time: {colli_loss_time:.4f}s ({colli_loss_time/total_time*100:.1f}%)")
-    print(f"Backward time: {backward_time:.4f}s ({backward_time/total_time*100:.1f}%)")
-    print(f"Step time: {step_time:.4f}s ({step_time/total_time*100:.1f}%)")
+    if verbose:
+        print("\n=== Timing Breakdown ===")
+        for name, duration in timers.items():
+            print(f"{name:15s}: {duration:.4f}s ({duration/timers['total']*100:.1f}%)")
+        
+        print("\n=== Loss Weights ===")
+        print(f"Position: {position_weight}, Orientation: {orientation_weight}")
+        print(f"Goal: {goal_weight}, Smooth: {smoothness_weight}, Colli: {collision_weight}")
+        print(f"Collision Threshold: {collision_threshold}m")
 
     return trajectory.detach().cpu().numpy()
 
@@ -371,6 +382,7 @@ def trajectory_opt_primitive(
     smoothness_weight: float = 1,
     collision_weight: float = 10,
     num_robot_points: int = 1024,
+    verbose: bool = False, # Added verbose argument
 ) -> np.ndarray:
     """
     Optimizes a robot trajectory using gradient descent to minimize:
@@ -572,7 +584,7 @@ def trajectory_opt_primitive(
         step_time += time.time() - step_start
 
         # Progress reporting
-        if iteration % 10 == 0:
+        if verbose and iteration % 10 == 0: # Conditional print
             print(
                 f"Iter {iteration}: "
                 f"Goal={goal_loss.item():.4f}, "
@@ -584,13 +596,14 @@ def trajectory_opt_primitive(
     total_time = time.time() - total_start
 
     # Print timing results
-    print("\nTiming Results:")
-    print(f"Total time: {total_time:.4f}s")
-    print(f"Setup time: {setup_time:.4f}s ({setup_time/total_time*100:.1f}%)")
-    print(f"Goal loss time: {goal_loss_time:.4f}s ({goal_loss_time/total_time*100:.1f}%)")
-    print(f"Smooth loss time: {smooth_loss_time:.4f}s ({smooth_loss_time/total_time*100:.1f}%)")
-    print(f"Collision loss time: {colli_loss_time:.4f}s ({colli_loss_time/total_time*100:.1f}%)")
-    print(f"Backward time: {backward_time:.4f}s ({backward_time/total_time*100:.1f}%)")
-    print(f"Step time: {step_time:.4f}s ({step_time/total_time*100:.1f}%)")
+    if verbose: # Conditional print
+        print("\nTiming Results:")
+        print(f"Total time: {total_time:.4f}s")
+        print(f"Setup time: {setup_time:.4f}s ({setup_time/total_time*100:.1f}%)")
+        print(f"Goal loss time: {goal_loss_time:.4f}s ({goal_loss_time/total_time*100:.1f}%)")
+        print(f"Smooth loss time: {smooth_loss_time:.4f}s ({smooth_loss_time/total_time*100:.1f}%)")
+        print(f"Collision loss time: {colli_loss_time:.4f}s ({colli_loss_time/total_time*100:.1f}%)")
+        print(f"Backward time: {backward_time:.4f}s ({backward_time/total_time*100:.1f}%)")
+        print(f"Step time: {step_time:.4f}s ({step_time/total_time*100:.1f}%)")
 
     return trajectory.detach().cpu().numpy()
