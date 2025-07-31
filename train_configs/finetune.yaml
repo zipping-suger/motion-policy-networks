@@ -14,11 +14,11 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: /workspace/pretrain_mpinets_hybrid_training_data_tiny/nbiiw6ec/epoch-epoch=3-end.ckpt
+model_path: /workspace/pretrain_mpinets_hybrid_training_data_tiny/nbiiw6ec/epoch-epoch=7-end.ckpt
 checkpoint_interval: 10
 validation_interval: 10
 gpus: 6 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/mpinets_finetune_mpinets_hybrid_training_data_tiny_epoch3
-experiment_name: mpinets_finetune_mpinets_hybrid_training_data_tiny_epoch-3
+save_checkpoint_dir: /workspace/mpinets_finetune_mpinets_hybrid_training_data_tiny_epoch7_no_regularization
+experiment_name: mpinets_finetune_mpinets_hybrid_training_data_tiny_epoch-7_no_regularization
 description: "finetune mpinets on hybrid solutions with 3% of the data"
