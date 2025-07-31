@@ -47,11 +47,13 @@ import trimesh
 import meshcat
 import urchin
 
+from loss import trajectory_opt_pointcld, trajectory_opt_primitive
+
 END_EFFECTOR_FRAME = "right_gripper"
 NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
-MAX_ROLLOUT_LENGTH = 150
+MAX_ROLLOUT_LENGTH = 69
 
 
 def make_point_cloud_from_problem(
@@ -263,7 +265,7 @@ def convert_primitive_problems_to_depth(problems: ProblemSet):
                     pbar.update(1)
 
 
-@torch.no_grad()
+# @torch.no_grad()
 def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
     mdl = MotionPolicyNetwork.load_from_checkpoint(mdl_path).cuda()
     mdl.eval()
@@ -298,6 +300,12 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
                     point_cloud.unsqueeze(0).cuda(),
                     gpu_fk_sampler,
                 )
+                trajectory = trajectory_opt_pointcld(
+                    trajectory, 
+                    problem.target, 
+                    construct_mixed_point_cloud(problem.obstacles, 2048)[:, :3],
+                    gpu_fk_sampler
+                )
                 eval.evaluate_trajectory(
                     trajectory,
                     0.08,  # We assume the network is to operate at roughly 12hz
@@ -313,7 +321,7 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
     eval.print_overall_metrics()
 
 
-@torch.no_grad()
+# @torch.no_grad()
 def visualize_results(mdl_path: str, problems: ProblemSet):
     """
     Runs a sequence of problems and visualizes the results in Pybullet
@@ -368,6 +376,12 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
                     problem.target,
                     point_cloud.unsqueeze(0).cuda(),
                     gpu_fk_sampler,
+                )
+                trajectory = trajectory_opt_pointcld(
+                    trajectory, 
+                    problem.target, 
+                    construct_mixed_point_cloud(problem.obstacles, 2048)[:, :3],
+                    gpu_fk_sampler
                 )
                 if problem.obstacles is not None:
                     eval.evaluate_trajectory(

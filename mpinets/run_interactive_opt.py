@@ -19,11 +19,12 @@ from mpinets.utils import normalize_franka_joints, unnormalize_franka_joints
 from mpinets.geometry import construct_mixed_point_cloud
 from mpinets.mpinets_types import PlanningProblem, ProblemSet
 from geometrout.primitive import Cuboid, Cylinder
+from loss import trajectory_opt_primitive, trajectory_opt_pointcld
 
 NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
-MAX_ROLLOUT_LENGTH = 75
+MAX_ROLLOUT_LENGTH = 69
 GOAL_THRESHOLD = 0.01  # 1 cm threshold for goal reaching
 
 
@@ -188,7 +189,7 @@ if __name__ == "__main__":
     print(f"\n======= Visualizing problem {args.problem_idx} (Env: {env_type_arg}, Problem Type: {problem_type_arg}) =======")
 
     # Precompute obstacle points once
-    obstacle_points = construct_mixed_point_cloud(problem.obstacles, NUM_OBSTACLE_POINTS)
+    obstacle_points = construct_mixed_point_cloud(problem.obstacles, NUM_OBSTACLE_POINTS)  
     obstacle_points_tensor = torch.tensor(
         obstacle_points[:, :3],
         dtype=torch.float32,
@@ -268,6 +269,8 @@ if __name__ == "__main__":
             trajectory = []
             trajectory.append(start_config.copy())
 
+            start_time = time.time()  # Start timing trajectory generation
+
             for i in range(MAX_ROLLOUT_LENGTH):
                 # Sample points
                 robot_points = gpu_fk_sampler.sample(
@@ -296,10 +299,28 @@ if __name__ == "__main__":
                     print(f"Reached target in {i+1} steps!")
                     break
 
-            print(f"Generated trajectory with {len(trajectory)} steps")
+            generation_time = time.time() - start_time  # End timing trajectory generation
+            print(f"Generated trajectory with {len(trajectory)} steps in {generation_time:.4f} seconds")
+            
+            optimization_start_time = time.time()  # Start timing trajectory optimization
+            # trajectory = trajectory_opt_primitive(
+            #     trajectory, 
+            #     target_pose,
+            #     problem.obstacles,
+            #     gpu_fk_sampler 
+            #     )
+            trajectory = trajectory_opt_pointcld(
+                trajectory,
+                target_pose,
+                construct_mixed_point_cloud(problem.obstacles, 2048)[:, :3],
+                gpu_fk_sampler
+            )
+            optimization_time = time.time() - optimization_start_time  # End timing trajectory optimization
+            print(f"Optimized trajectory in {optimization_time:.4f} seconds")
+            
             franka.marionette(trajectory[0])
             time.sleep(0.2)
-
+            
             print(f"Executing policy trajectory...")
             for q in tqdm(trajectory):
                 franka.control_position(q)
