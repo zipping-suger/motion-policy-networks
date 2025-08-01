@@ -6,7 +6,7 @@ training_model_parameters:
 
 data_module_parameters:
   data_dir: /data/mpinets_hybrid_training_data_tiny
-  trajectory_key: 'hybrid_solutions' # Could also use 'global_solutions' for the global expert
+  trajectory_key: 'global_solutions' # Could also use 'global_solutions' for the global expert
   num_obstacle_points: 4096
   num_target_points: 128
   random_scale: 0.015
@@ -18,6 +18,6 @@ checkpoint_interval: 10
 validation_interval: 3000
 gpus: 6 # If > 1, will use DDP for training.
 batch_size: 16
-save_checkpoint_dir: /workspace/pretrain_mpinets_hybrid_training_data_tiny
-experiment_name: pretrain_mpinets_hybrid_training_data_tiny
-description: "Use 3% of the mpinet data for pretrain"
+save_checkpoint_dir: /workspace/pretrain_mpinets_hybrid_training_data_tiny_global
+experiment_name: pretrain_mpinets_hybrid_training_data_tiny_global
+description: "Use 3% of the mpinet data for pretrain with global expert"
