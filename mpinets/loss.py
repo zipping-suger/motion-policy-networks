@@ -203,6 +203,20 @@ import torch
 import time
 import numpy as np
 from robofin.pointcloud.torch import FrankaSampler
+from robofin.robots import FrankaRealRobot
+from mpinets.geometry import TorchCuboids, TorchCylinders
+from typing import List, Union
+from geometrout.primitive import Cuboid, Cylinder
+from geometrout.transform import SE3
+# Assuming loss.py contains compute_pose_loss_rotmat and collision_loss
+from loss import compute_pose_loss_rotmat, collision_loss
+
+
+import torch
+import time
+import numpy as np
+from robofin.pointcloud.torch import FrankaSampler
+from robofin.robots import FrankaRealRobot
 from mpinets.geometry import TorchCuboids, TorchCylinders
 from typing import List, Union
 from geometrout.primitive import Cuboid, Cylinder
@@ -253,6 +267,14 @@ def trajectory_opt_pointcld(
     trajectory = torch.tensor(
         trajectory_init, dtype=torch.float32, device="cuda", requires_grad=True
     )
+    
+    # +++ START: JOINT LIMITS MODIFICATION +++
+    # Define joint limits as PyTorch tensors on the correct device
+    joint_limits = FrankaRealRobot.JOINT_LIMITS
+    lower_limits = torch.tensor(joint_limits[:, 0], dtype=torch.float32, device="cuda")
+    upper_limits = torch.tensor(joint_limits[:, 1], dtype=torch.float32, device="cuda")
+    # +++ END: JOINT LIMITS MODIFICATION +++
+
 
     # Prepare target pose and obstacle points
     setup_start = time.time()
@@ -346,6 +368,15 @@ def trajectory_opt_pointcld(
         step_start = time.time()
         optimizer.step()
         timers['step'] += time.time() - step_start
+        
+        # +++ START: JOINT LIMITS MODIFICATION +++
+        # Clamp the trajectory to be within the joint limits
+        with torch.no_grad():
+            trajectory.data = torch.max(
+                torch.min(trajectory.data, upper_limits), lower_limits
+            )
+        # +++ END: JOINT LIMITS MODIFICATION +++
+
 
         # Progress reporting
         if verbose and (iteration % 10 == 0 or iteration == num_iterations-1):
@@ -370,240 +401,3 @@ def trajectory_opt_pointcld(
 
     return trajectory.detach().cpu().numpy()
 
-
-def trajectory_opt_primitive(
-    trajectory_init: np.ndarray,
-    target_pose: SE3,
-    obstacles: List[Union[Cuboid, Cylinder]],
-    gpu_fk_sampler: FrankaSampler,
-    num_iterations: int = 35,
-    learning_rate: float = 1e-1,
-    goal_weight: float = 0.1,
-    smoothness_weight: float = 1,
-    collision_weight: float = 10,
-    num_robot_points: int = 1024,
-    verbose: bool = False, # Added verbose argument
-) -> np.ndarray:
-    """
-    Optimizes a robot trajectory using gradient descent to minimize:
-    - Goal-reaching error (position + orientation)
-    - Trajectory smoothness (acceleration penalty)
-    - Collision with obstacles
-    """
-    # Initialize timers
-    total_time = 0
-    setup_time = 0
-    goal_loss_time = 0
-    smooth_loss_time = 0
-    colli_loss_time = 0
-    backward_time = 0
-    step_time = 0
-
-    total_start = time.time()
-
-    # Convert to PyTorch tensor with gradient tracking
-    trajectory = torch.tensor(
-        trajectory_init, dtype=torch.float32, device="cuda", requires_grad=True
-    )
-
-    # Prepare target pose (no gradients needed)
-    setup_start = time.time()
-    with torch.no_grad():
-        target_position = torch.as_tensor(
-            target_pose.matrix[:3, 3], dtype=torch.float32, device="cuda"
-        )
-        target_rot_mat = torch.as_tensor(
-            target_pose.matrix[:3, :3].flatten(), dtype=torch.float32, device="cuda"
-        )
-        target_pose_input = torch.cat((target_position, target_rot_mat)).unsqueeze(0)
-
-        # Prepare obstacle tensors
-        cuboids = [o for o in obstacles if isinstance(o, Cuboid)]
-        cylinders = [o for o in obstacles if isinstance(o, Cylinder)]
-
-        # Cuboid tensors
-        cuboid_centers = (
-            torch.tensor(
-                [o.center for o in cuboids], dtype=torch.float32, device="cuda"
-            )
-            .unsqueeze(0)
-            .repeat(len(trajectory), 1, 1)
-            if cuboids
-            else torch.empty(
-                (len(trajectory), 0, 3), dtype=torch.float32, device="cuda"
-            )
-        )
-        cuboid_dims = (
-            torch.tensor([o.dims for o in cuboids], dtype=torch.float32, device="cuda")
-            .unsqueeze(0)
-            .repeat(len(trajectory), 1, 1)
-            if cuboids
-            else torch.empty(
-                (len(trajectory), 0, 3), dtype=torch.float32, device="cuda"
-            )
-        )
-        cuboid_quats = (
-            torch.tensor(
-                [o.pose.so3.wxyz for o in cuboids],
-                dtype=torch.float32,
-                device="cuda",
-            )
-            .unsqueeze(0)
-            .repeat(len(trajectory), 1, 1)
-            if cuboids
-            else torch.empty(
-                (len(trajectory), 0, 4), dtype=torch.float32, device="cuda"
-            )
-        )
-
-        # Cylinder tensors
-        if cylinders:
-            cylinder_centers = (
-                torch.tensor(
-                    [o.center for o in cylinders], dtype=torch.float32, device="cuda"
-                )
-                .unsqueeze(0)
-                .repeat(len(trajectory), 1, 1)
-            )
-            cylinder_radii = (
-                torch.tensor(
-                    [[o.radius] for o in cylinders], dtype=torch.float32, device="cuda"
-                )
-                .unsqueeze(0)
-                .repeat(len(trajectory), 1, 1)
-            )
-            cylinder_heights = (
-                torch.tensor(
-                    [[o.height] for o in cylinders], dtype=torch.float32, device="cuda"
-                )
-                .unsqueeze(0)
-                .repeat(len(trajectory), 1, 1)
-            )
-            cylinder_quats = (
-                torch.tensor(
-                    [o.pose.so3.wxyz for o in cylinders],
-                    dtype=torch.float32,
-                    device="cuda",
-                )
-                .unsqueeze(0)
-                .repeat(len(trajectory), 1, 1)
-            )
-        else:
-            # Dummy cylinder values
-            cylinder_radii_np = np.array([[0.0]])
-            cylinder_heights_np = np.array([[0.0]])
-            cylinder_centers_np = np.array([[0.0, 0.0, 0.0]])
-            cylinder_quats_np = np.array(
-                [[1.0, 0.0, 0.0, 0.0]]
-            )
-
-            cylinder_centers = (
-                torch.tensor(cylinder_centers_np, dtype=torch.float32, device="cuda")
-                .unsqueeze(0)
-                .repeat(len(trajectory), 1, 1)
-            )
-            cylinder_radii = (
-                torch.tensor(cylinder_radii_np, dtype=torch.float32, device="cuda")
-                .unsqueeze(0)
-                .repeat(len(trajectory), 1, 1)
-            )
-            cylinder_heights = (
-                torch.tensor(cylinder_heights_np, dtype=torch.float32, device="cuda")
-                .unsqueeze(0)
-                .repeat(len(trajectory), 1, 1)
-            )
-            cylinder_quats = (
-                torch.tensor(cylinder_quats_np, dtype=torch.float32, device="cuda")
-                .unsqueeze(0)
-                .repeat(len(trajectory), 1, 1)
-            )
-
-        has_any_obstacles_for_collision = bool(cuboids) or bool(cylinders)
-
-    setup_time = time.time() - setup_start
-
-    # Setup optimizer
-    optimizer = torch.optim.Adam([trajectory], lr=learning_rate)
-
-    for iteration in range(num_iterations):
-        optimizer.zero_grad()
-
-        # 1. Goal-reaching loss
-        goal_start = time.time()
-        final_pose = gpu_fk_sampler.end_effector_pose(trajectory[-1:])
-        pos_loss, rot_loss = compute_pose_loss_rotmat(final_pose, target_pose_input)
-        goal_loss = pos_loss + 0.1 * rot_loss
-        goal_loss_time += time.time() - goal_start
-
-        # 2. Smoothness loss
-        smooth_start = time.time()
-        if len(trajectory) > 2:
-            acc = trajectory[:-2] - 2 * trajectory[1:-1] + trajectory[2:]
-            smooth_loss = torch.mean(torch.sum(acc**2, dim=-1))
-        else:
-            smooth_loss = torch.sum(trajectory * 0.0)
-        smooth_loss_time += time.time() - smooth_start
-
-        # 3. Collision loss
-        colli_start = time.time()
-        input_pc = gpu_fk_sampler.sample(trajectory, num_robot_points)
-        colli_loss = collision_loss(
-            input_pc,
-            cuboid_centers,
-            cuboid_dims,
-            cuboid_quats,
-            cylinder_centers,
-            cylinder_radii,
-            cylinder_heights,
-            cylinder_quats,
-        )
-        colli_loss_time += time.time() - colli_start
-
-        # Combined loss
-        total_loss = (
-            goal_weight * goal_loss
-            + smoothness_weight * smooth_loss
-            + collision_weight * colli_loss
-        )
-
-        # Backpropagation
-        backward_start = time.time()
-        total_loss.backward()
-        backward_time += time.time() - backward_start
-
-        ### FIX START ###
-        # Zero out the gradient for the first configuration to keep it fixed
-        with torch.no_grad():
-            if trajectory.grad is not None:
-                trajectory.grad[0].zero_()
-        ### FIX END ###
-
-        # Optimizer step
-        step_start = time.time()
-        optimizer.step()
-        step_time += time.time() - step_start
-
-        # Progress reporting
-        if verbose and iteration % 10 == 0: # Conditional print
-            print(
-                f"Iter {iteration}: "
-                f"Goal={goal_loss.item():.4f}, "
-                f"Smooth={smooth_loss.item():.4f}, "
-                f"Colli={colli_loss.item():.4f}, "
-                f"Total={total_loss.item():.4f}"
-            )
-
-    total_time = time.time() - total_start
-
-    # Print timing results
-    if verbose: # Conditional print
-        print("\nTiming Results:")
-        print(f"Total time: {total_time:.4f}s")
-        print(f"Setup time: {setup_time:.4f}s ({setup_time/total_time*100:.1f}%)")
-        print(f"Goal loss time: {goal_loss_time:.4f}s ({goal_loss_time/total_time*100:.1f}%)")
-        print(f"Smooth loss time: {smooth_loss_time:.4f}s ({smooth_loss_time/total_time*100:.1f}%)")
-        print(f"Collision loss time: {colli_loss_time:.4f}s ({colli_loss_time/total_time*100:.1f}%)")
-        print(f"Backward time: {backward_time:.4f}s ({backward_time/total_time*100:.1f}%)")
-        print(f"Step time: {step_time:.4f}s ({step_time/total_time*100:.1f}%)")
-
-    return trajectory.detach().cpu().numpy()

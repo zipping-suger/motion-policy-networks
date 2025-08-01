@@ -19,7 +19,7 @@ from mpinets.utils import normalize_franka_joints, unnormalize_franka_joints
 from mpinets.geometry import construct_mixed_point_cloud
 from mpinets.mpinets_types import PlanningProblem, ProblemSet
 from geometrout.primitive import Cuboid, Cylinder
-from loss import trajectory_opt_primitive, trajectory_opt_pointcld
+from loss import trajectory_opt_pointcld
 
 NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096

@@ -47,7 +47,7 @@ import trimesh
 import meshcat
 import urchin
 
-from loss import trajectory_opt_pointcld, trajectory_opt_primitive
+from loss import trajectory_opt_pointcld
 
 END_EFFECTOR_FRAME = "right_gripper"
 NUM_ROBOT_POINTS = 2048
