@@ -24,7 +24,7 @@ from loss import trajectory_opt_pointcld
 NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
-MAX_ROLLOUT_LENGTH = 69
+MAX_ROLLOUT_LENGTH = 150
 GOAL_THRESHOLD = 0.01  # 1 cm threshold for goal reaching
 
 
