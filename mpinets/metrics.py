@@ -69,7 +69,7 @@ class Evaluator:
         :param gui bool: Whether to visualize trajectories (and showing visually whether they are failures)
         """
         self.sim = Bullet(gui=False)
-        self.selfcc = FrankaSelfCollisionChecker()
+        self.selfcc = FrankaSelfCollisionChecker() # It raise false alarm for self collision !!!
         self.hd_sim_robot = self.sim.load_robot(
             FrankaRobot, hd=True, default_prismatic_value=0.025
         )
@@ -262,8 +262,7 @@ class Evaluator:
         for i, q in enumerate(trajectory):
             self.self_collision_robot.marionette(q)
             if self.self_collision_sim.in_collision(
-                self.self_collision_robot, check_self=True
-            ) or self.selfcc.has_self_collision(q):
+                    self.self_collision_robot, check_self=True):
                 return True
         return False
 

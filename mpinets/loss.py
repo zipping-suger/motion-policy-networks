@@ -225,22 +225,209 @@ from geometrout.transform import SE3
 from loss import compute_pose_loss_rotmat, collision_loss
 
 
+# A helper constant to define which link pairs to check for self-collision.
+# This avoids checking adjacent links, which are always "in collision".
+# A more robust solution could generate this automatically from the URDF.
+FRANKA_SELF_COLLISION_PAIRS = [
+    ('panda_link0', 'panda_link2'), ('panda_link0', 'panda_link3'),
+    ('panda_link0', 'panda_link4'), ('panda_link0', 'panda_link5'),
+    ('panda_link0', 'panda_link6'), ('panda_link0', 'panda_link7'),
+    ('panda_link0', 'panda_hand'),
+    ('panda_link1', 'panda_link3'), ('panda_link1', 'panda_link4'),
+    ('panda_link1', 'panda_link5'), ('panda_link1', 'panda_link6'),
+    ('panda_link1', 'panda_link7'), ('panda_link1', 'panda_hand'),
+    ('panda_link2', 'panda_link4'), ('panda_link2', 'panda_link5'),
+    ('panda_link2', 'panda_link6'), ('panda_link2', 'panda_link7'),
+    ('panda_link2', 'panda_hand'),
+    ('panda_link3', 'panda_link5'), ('panda_link3', 'panda_link6'),
+    ('panda_link3', 'panda_link7'), ('panda_link3', 'panda_hand'),
+    ('panda_link4', 'panda_link6'), ('panda_link4', 'panda_link7'),
+    ('panda_link4', 'panda_hand'),
+    ('panda_link5', 'panda_hand'),
+    # Note: 'panda_hand' in the robofin URDF includes the gripper fingers.
+]
+
+
+def trajectory_opt_pointcld_self_collision(
+    trajectory_init: np.ndarray,
+    target_pose: SE3,
+    obstacle_points: np.ndarray,
+    gpu_fk_sampler: FrankaSampler,
+    num_iterations: int = 20,
+    learning_rate: float = 1e-4,
+    goal_weight: float = 0.1,
+    position_weight: float = 5.0,
+    orientation_weight: float = 0.1,
+    smoothness_weight: float = 1.0,
+    collision_weight: float = 20.0,
+    self_collision_weight: float = 50.0,  # New: Weight for self-collision
+    collision_threshold: float = 0.03,
+    num_robot_points: int = 512,
+    freeze_first_config: bool = True,
+    verbose: bool = False,
+) -> np.ndarray:
+    """
+    Optimizes a robot trajectory using gradient descent, including a
+    self-collision penalty based on per-link point clouds.
+
+    Args:
+        trajectory_init (np.ndarray): The initial trajectory (T, 7).
+        target_pose (SE3): The target end-effector pose.
+        obstacle_points (np.ndarray): Point cloud of external obstacles (N, 3).
+        gpu_fk_sampler (FrankaSampler): A differentiable FK and point cloud sampler.
+        num_iterations (int): Number of optimization iterations.
+        learning_rate (float): Learning rate for the Adam optimizer.
+        goal_weight (float): Overall weight for the goal-reaching loss.
+        position_weight (float): Weight for the position component of the goal loss.
+        orientation_weight (float): Weight for the orientation component of the goal loss.
+        smoothness_weight (float): Weight for the trajectory smoothness penalty.
+        collision_weight (float): Weight for the environment collision penalty.
+        self_collision_weight (float): Weight for the self-collision penalty.
+        collision_threshold (float): Distance threshold (in meters) for collision penalties.
+        num_robot_points (int): Number of points to sample on the robot surface.
+        freeze_first_config (bool): If True, the first configuration of the trajectory is not optimized.
+        verbose (bool): If True, prints loss values during optimization.
+
+    Returns:
+        np.ndarray: The optimized trajectory (T, 7).
+    """
+    # Convert to PyTorch tensor with gradient tracking
+    trajectory = torch.tensor(
+        trajectory_init, dtype=torch.float32, device="cuda", requires_grad=True
+    )
+
+    # Define joint limits for clamping
+    joint_limits = FrankaRealRobot.JOINT_LIMITS
+    lower_limits = torch.tensor(joint_limits[:, 0], dtype=torch.float32, device="cuda")
+    upper_limits = torch.tensor(joint_limits[:, 1], dtype=torch.float32, device="cuda")
+
+    # Prepare target pose and obstacle points for loss calculation
+    with torch.no_grad():
+        target_position = torch.as_tensor(
+            target_pose.matrix[:3, 3], dtype=torch.float32, device="cuda"
+        )
+        target_rot_mat = torch.as_tensor(
+            target_pose.matrix[:3, :3], dtype=torch.float32, device="cuda"
+        ).flatten()
+        target_pose_input = torch.cat((target_position, target_rot_mat)).unsqueeze(0)
+
+        if obstacle_points.size > 0:
+            obstacle_tensor = torch.tensor(
+                obstacle_points, dtype=torch.float32, device="cuda"
+            )
+            expanded_obstacle = obstacle_tensor.unsqueeze(0).expand(
+                len(trajectory), -1, -1
+            )
+            has_obstacles = True
+        else:
+            has_obstacles = False
+
+    # Setup optimizer
+    optimizer = torch.optim.Adam([trajectory], lr=learning_rate, weight_decay=1e-4)
+
+    for iteration in range(num_iterations):
+        optimizer.zero_grad()
+
+        # 1. Goal-reaching loss (position and orientation)
+        final_pose = gpu_fk_sampler.end_effector_pose(trajectory[-1:])
+        pos_loss, rot_loss = compute_pose_loss_rotmat(final_pose, target_pose_input)
+        goal_loss = position_weight * pos_loss + orientation_weight * rot_loss
+
+        # 2. Smoothness loss (penalizes acceleration)
+        if len(trajectory) > 2:
+            acc = trajectory[:-2] - 2 * trajectory[1:-1] + trajectory[2:]
+            smooth_loss = torch.mean(torch.sum(acc**2, dim=-1))
+        else:
+            smooth_loss = torch.tensor(0.0, device="cuda")
+
+        # 3. Environment Collision Loss
+        if has_obstacles:
+            # Sample a single point cloud for the whole robot for env collision
+            input_pc = gpu_fk_sampler.sample(trajectory, num_robot_points)
+            dists = torch.cdist(input_pc, expanded_obstacle)
+            min_dists = torch.min(dists, dim=2)[0]
+            colli_loss = torch.sum(torch.clamp(collision_threshold - min_dists, min=0))
+        else:
+            colli_loss = torch.tensor(0.0, device="cuda")
+            
+        # 4. Self-Collision Loss
+        # Sample point clouds per link. The sampler returns a dict: {link_name: (T, K_i, 3)}
+        per_link_pcs = gpu_fk_sampler.sample_per_link(trajectory, total_points=num_robot_points)
+
+        self_colli_loss = torch.tensor(0.0, device="cuda")
+        for link_a_name, link_b_name in FRANKA_SELF_COLLISION_PAIRS:
+            if link_a_name in per_link_pcs and link_b_name in per_link_pcs:
+                pc_a = per_link_pcs[link_a_name]  # Shape: (T, K_a, 3)
+                pc_b = per_link_pcs[link_b_name]  # Shape: (T, K_b, 3)
+
+                # Batched distance computation across all trajectory timesteps
+                dists = torch.cdist(pc_a, pc_b)  # Shape: (T, K_a, K_b) 
+
+                # Find the minimum distance for each timestep by flattening point pairs
+                min_dists_per_timestep = torch.min(dists.view(dists.shape[0], -1), dim=1)[0] # Shape: (T,)
+
+                # Hinge loss for this pair, aggregated over the trajectory
+                pair_loss = torch.sum(torch.clamp(collision_threshold - min_dists_per_timestep, min=0))
+                self_colli_loss += pair_loss
+        
+        # check if self_colli_loss is 0
+        if self_colli_loss != 0:
+            print(f"Self-collision loss: {self_colli_loss.item():.8f} for pair {link_a_name} and {link_b_name}")
+
+        # 5. Combined loss
+        total_loss = (
+            goal_weight * goal_loss +
+            smoothness_weight * smooth_loss +
+            collision_weight * colli_loss +
+            self_collision_weight * self_colli_loss
+        )
+
+        # Backpropagation
+        total_loss.backward()
+
+        # Zero out gradient for the first configuration if it's meant to be fixed
+        if freeze_first_config and trajectory.grad is not None:
+            with torch.no_grad():
+                trajectory.grad[0].zero_()
+
+        # Optimizer step
+        optimizer.step()
+
+        # Clamp the trajectory to be within the robot's joint limits
+        with torch.no_grad():
+            trajectory.data = torch.max(
+                torch.min(trajectory.data, upper_limits), lower_limits
+            )
+
+        # Progress reporting
+        if verbose and (iteration % 10 == 0 or iteration == num_iterations - 1):
+            print(f"Iter {iteration}: "
+                  f"Pos={pos_loss.item():.4f}, "
+                  f"Rot={rot_loss.item():.4f}, "
+                  f"Smooth={smooth_loss.item():.4f}, "
+                  f"Colli={colli_loss.item():.4f}, "
+                  f"SelfColli={self_colli_loss.item():.4f}, " # Added self-collision to printout
+                  f"Total={total_loss.item():.4f}")
+
+    return trajectory.detach().cpu().numpy()
+
+
 def trajectory_opt_pointcld(
     trajectory_init: np.ndarray,
     target_pose: SE3,
     obstacle_points: np.ndarray,
     gpu_fk_sampler: FrankaSampler,
-    num_iterations: int = 30,
-    learning_rate: float = 1e-3,
+    num_iterations: int = 20,
+    learning_rate: float = 1e-4,
     goal_weight: float = 0.1,
     position_weight: float = 5.0,  # New: separate weight for position
     orientation_weight: float = 0.1,  # New: separate weight for orientation
     smoothness_weight: float = 1,
     collision_weight: float = 20,
     collision_threshold: float = 0.03,  # New: configurable collision threshold (3cm)
-    num_robot_points: int = 512,
+    num_robot_points: int = 1024,
     freeze_first_config: bool = True,  # New: option to freeze initial config
-    verbose: bool = False,
+    verbose: bool = True,
 ) -> np.ndarray:
     """
     Optimizes a robot trajectory using gradient descent with enhanced features:
@@ -342,7 +529,7 @@ def trajectory_opt_pointcld(
             min_dists = torch.min(dists, dim=2)[0]  # [T, M]
             
             # Hinge loss with configurable threshold
-            colli_loss = torch.mean(torch.clamp(collision_threshold - min_dists, min=0))
+            colli_loss = torch.sum(torch.clamp(collision_threshold - min_dists, min=0))
         else:
             colli_loss = torch.tensor(0.0, device="cuda")
         timers['collision_loss'] += time.time() - colli_start

@@ -37,7 +37,8 @@ from typing import List, Union, Optional, Dict
 import argparse
 
 import torch
-from robofin.pointcloud.torch import FrankaSampler
+from robofin.pointcloud.torch import FrankaSampler 
+from utils import FrankaSampler as my_FrankaSampler
 from mpinets.model import MotionPolicyNetwork
 from mpinets.geometry import construct_mixed_point_cloud
 from mpinets.utils import normalize_franka_joints, unnormalize_franka_joints
@@ -47,7 +48,7 @@ import trimesh
 import meshcat
 import urchin
 
-from loss import trajectory_opt_pointcld
+from loss import trajectory_opt_pointcld, trajectory_opt_pointcld_self_collision
 
 END_EFFECTOR_FRAME = "right_gripper"
 NUM_ROBOT_POINTS = 2048
@@ -270,7 +271,7 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
     mdl = MotionPolicyNetwork.load_from_checkpoint(mdl_path).cuda()
     mdl.eval()
     cpu_fk_sampler = FrankaSampler("cpu", use_cache=True)
-    gpu_fk_sampler = FrankaSampler("cuda:0", use_cache=True)
+    gpu_fk_sampler = my_FrankaSampler("cuda:0", use_cache=True, with_base_link=True)
     eval = Evaluator()
 
     for scene_type, scene_sets in problems.items():
@@ -306,6 +307,7 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
                     construct_mixed_point_cloud(problem.obstacles, 2048)[:, :3],
                     gpu_fk_sampler
                 )
+                eval.has_self_collision(trajectory)
                 eval.evaluate_trajectory(
                     trajectory,
                     0.08,  # We assume the network is to operate at roughly 12hz
@@ -332,7 +334,7 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
     mdl = MotionPolicyNetwork.load_from_checkpoint(mdl_path).cuda()
     mdl.eval()
     cpu_fk_sampler = FrankaSampler("cpu", use_cache=True)
-    gpu_fk_sampler = FrankaSampler("cuda:0", use_cache=True)
+    gpu_fk_sampler = my_FrankaSampler("cuda:0", use_cache=True, with_base_link=True)
     sim = BulletController(hz=12, substeps=20, gui=True)
     eval = Evaluator()
 
@@ -383,6 +385,7 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
                     construct_mixed_point_cloud(problem.obstacles, 2048)[:, :3],
                     gpu_fk_sampler
                 )
+                eval.has_self_collision(trajectory)
                 if problem.obstacles is not None:
                     eval.evaluate_trajectory(
                         trajectory,
