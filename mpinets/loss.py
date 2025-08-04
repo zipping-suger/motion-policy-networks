@@ -419,15 +419,15 @@ def trajectory_opt_pointcld(
     gpu_fk_sampler: FrankaSampler,
     num_iterations: int = 20,
     learning_rate: float = 1e-4,
-    goal_weight: float = 0.1,
+    goal_weight: float = 1,
     position_weight: float = 5.0,  # New: separate weight for position
     orientation_weight: float = 0.1,  # New: separate weight for orientation
     smoothness_weight: float = 1,
     collision_weight: float = 20,
     collision_threshold: float = 0.03,  # New: configurable collision threshold (3cm)
-    num_robot_points: int = 1024,
+    num_robot_points: int = 512,
     freeze_first_config: bool = True,  # New: option to freeze initial config
-    verbose: bool = True,
+    verbose: bool = False,  # New: verbose output for debugging
 ) -> np.ndarray:
     """
     Optimizes a robot trajectory using gradient descent with enhanced features:
