@@ -263,7 +263,7 @@ class Evaluator:
             self.self_collision_robot.marionette(q)
             if self.self_collision_sim.in_collision(
                 self.self_collision_robot, check_self=True
-            ) or self.selfcc.has_self_collision(q):
+            ):
                 return True
         return False
 
