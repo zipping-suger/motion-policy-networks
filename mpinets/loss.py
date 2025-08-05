@@ -417,9 +417,9 @@ def trajectory_opt_pointcld(
     target_pose: SE3,
     obstacle_points: np.ndarray,
     gpu_fk_sampler: FrankaSampler,
-    num_iterations: int = 20,
-    learning_rate: float = 1e-4,
-    goal_weight: float = 1,
+    num_iterations: int = 30,
+    learning_rate: float = 1e-3,
+    goal_weight: float = 100,
     position_weight: float = 5.0,  # New: separate weight for position
     orientation_weight: float = 0.1,  # New: separate weight for orientation
     smoothness_weight: float = 1,
@@ -427,7 +427,7 @@ def trajectory_opt_pointcld(
     collision_threshold: float = 0.03,  # New: configurable collision threshold (3cm)
     num_robot_points: int = 512,
     freeze_first_config: bool = True,  # New: option to freeze initial config
-    verbose: bool = False,  # New: verbose output for debugging
+    verbose: bool = True,  # New: verbose output for debugging
 ) -> np.ndarray:
     """
     Optimizes a robot trajectory using gradient descent with enhanced features:
@@ -447,21 +447,20 @@ def trajectory_opt_pointcld(
         'step': 0,
         'fk': 0
     }
-    
+
     timers['total'] = time.time()
 
     # Convert to PyTorch tensor with gradient tracking
     trajectory = torch.tensor(
         trajectory_init, dtype=torch.float32, device="cuda", requires_grad=True
     )
-    
+
     # +++ START: JOINT LIMITS MODIFICATION +++
     # Define joint limits as PyTorch tensors on the correct device
     joint_limits = FrankaRealRobot.JOINT_LIMITS
     lower_limits = torch.tensor(joint_limits[:, 0], dtype=torch.float32, device="cuda")
     upper_limits = torch.tensor(joint_limits[:, 1], dtype=torch.float32, device="cuda")
     # +++ END: JOINT LIMITS MODIFICATION +++
-
 
     # Prepare target pose and obstacle points
     setup_start = time.time()
@@ -474,7 +473,7 @@ def trajectory_opt_pointcld(
             target_pose.matrix[:3, :3], dtype=torch.float32, device="cuda"
         ).flatten()
         target_pose_input = torch.cat((target_position, target_rot_mat)).unsqueeze(0)
-        
+
         # Prepare obstacle point cloud
         if obstacle_points.size > 0:
             obstacle_tensor = torch.tensor(
@@ -494,7 +493,7 @@ def trajectory_opt_pointcld(
     timers['setup'] = time.time() - setup_start
 
     # Setup optimizer with weight decay for better smoothness
-    optimizer = torch.optim.Adam([trajectory], lr=learning_rate, weight_decay=1e-4)
+    optimizer = torch.optim.Adam([trajectory], lr=learning_rate)
 
     for iteration in range(num_iterations):
         optimizer.zero_grad()
@@ -504,7 +503,7 @@ def trajectory_opt_pointcld(
         fk_start = time.time()
         final_pose = gpu_fk_sampler.end_effector_pose(trajectory[-1:])
         timers['fk'] += time.time() - fk_start
-        
+
         pos_loss, rot_loss = compute_pose_loss_rotmat(final_pose, target_pose_input)
         goal_loss = position_weight * pos_loss + orientation_weight * rot_loss
         timers['goal_loss'] += time.time() - goal_start
@@ -522,12 +521,12 @@ def trajectory_opt_pointcld(
         # 3. Point cloud collision loss
         colli_start = time.time()
         input_pc = gpu_fk_sampler.sample(trajectory, num_robot_points)
-        
+
         if has_obstacles:
             # Vectorized distance computation
             dists = torch.cdist(input_pc, expanded_obstacle)  # [T, M, N]
             min_dists = torch.min(dists, dim=2)[0]  # [T, M]
-            
+
             # Hinge loss with configurable threshold
             colli_loss = torch.sum(torch.clamp(collision_threshold - min_dists, min=0))
         else:
@@ -555,7 +554,7 @@ def trajectory_opt_pointcld(
         step_start = time.time()
         optimizer.step()
         timers['step'] += time.time() - step_start
-        
+
         # +++ START: JOINT LIMITS MODIFICATION +++
         # Clamp the trajectory to be within the joint limits
         with torch.no_grad():
@@ -563,7 +562,6 @@ def trajectory_opt_pointcld(
                 torch.min(trajectory.data, upper_limits), lower_limits
             )
         # +++ END: JOINT LIMITS MODIFICATION +++
-
 
         # Progress reporting
         if verbose and (iteration % 10 == 0 or iteration == num_iterations-1):
@@ -580,7 +578,7 @@ def trajectory_opt_pointcld(
         print("\n=== Timing Breakdown ===")
         for name, duration in timers.items():
             print(f"{name:15s}: {duration:.4f}s ({duration/timers['total']*100:.1f}%)")
-        
+
         print("\n=== Loss Weights ===")
         print(f"Position: {position_weight}, Orientation: {orientation_weight}")
         print(f"Goal: {goal_weight}, Smooth: {smoothness_weight}, Colli: {collision_weight}")
