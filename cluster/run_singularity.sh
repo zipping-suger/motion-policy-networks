@@ -13,6 +13,25 @@ CHECKPOINT_DIR="/cluster/home/yixili/motion-policy-networks/checkpoints"
 
 echo "Starting Singularity container..."
 
+# --- Targeted Python bytecode cleanup ---
+echo "Cleaning Python 3.7 bytecode caches..."
+if singularity exec --writable-tmpfs "$CONTAINER_IMAGE" \
+   find /usr/lib/python3.7 -name "*.pyc" -delete 2>/dev/null ; then
+    echo "Bytecode cleanup successful"
+else
+    echo "Bytecode cleanup completed (some files may not exist)"
+fi
+
+# --- Dependency Management ---
+echo "Ensuring package compatibility..."
+singularity exec --writable-tmpfs "$CONTAINER_IMAGE" \
+  bash -c "pip install --upgrade --no-cache-dir pip && \
+           pip install --force-reinstall --no-deps --no-cache-dir \
+           gitpython==3.1.44 \
+           wandb==0.18.7 \
+           numpy==1.21.6 && \
+           pip check"
+
 singularity exec \
   --nv \
   --cleanenv \
