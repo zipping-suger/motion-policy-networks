@@ -94,7 +94,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         # Cosine annealing with warm restarts
         scheduler = {
             "scheduler": torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                optimizer, T_0=10, T_mult=2, eta_min=1e-6
+                optimizer, T_0=1, T_mult=2, eta_min=1e-6
             ),
             "interval": "epoch",
         }
