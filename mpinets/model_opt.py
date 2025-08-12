@@ -89,17 +89,21 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         for params in self.point_cloud_encoder.parameters():
             params.requires_grad = False
 
+    # def configure_optimizers(self):
+    #     optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+    #     # Cosine annealing with warm restarts
+    #     scheduler = {
+    #         "scheduler": torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    #             optimizer, T_0=1, T_mult=2, eta_min=1e-6
+    #         ),
+    #         "interval": "epoch",
+    #     }
+    #     return [optimizer], [scheduler]
+    
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
-        # Cosine annealing with warm restarts
-        scheduler = {
-            "scheduler": torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                optimizer, T_0=1, T_mult=2, eta_min=1e-6
-            ),
-            "interval": "epoch",
-        }
-        return [optimizer], [scheduler]
-
+        return optimizer
+    
     def on_before_optimizer_step(self, optimizer, optimizer_idx=None):
         """
         PyTorch Lightning hook: clip gradients before optimizer step
