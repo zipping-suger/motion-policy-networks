@@ -6,7 +6,7 @@ training_model_parameters:
 
 data_module_parameters:
   data_dir: /data/cabinet_6k
-  trajectory_key: 'hybrid_solutions'
+  trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
   random_scale: 0
