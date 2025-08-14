@@ -172,4 +172,8 @@ checkpoints/
 # everything under problems
 problems/
 
-.vscode/    
+# vscode
+.vscode/
+
+# any point cloud files .npy
+*.npy

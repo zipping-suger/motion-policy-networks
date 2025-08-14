@@ -121,12 +121,22 @@ class Planner:
         ] = target_points.float()
         point_cloud = point_cloud.unsqueeze(0)
 
+        # Construct the target pose input for the model
+        target_position = torch.as_tensor(
+            target_pose.matrix[:3, 3], dtype=torch.float32
+        )
+        # Use rotation matrix R9 as rotation representation
+        target_rot_mat = torch.as_tensor(
+            target_pose.matrix[:3, :3].flatten(), dtype=torch.float32
+        )
+        target_pose_input = torch.cat((target_position, target_rot_mat), dim=0).float().unsqueeze(0).to(q.device)
+
         trajectory = [q]
         q_norm = normalize_franka_joints(q)
         success = False
         for _ in range(MAX_ROLLOUT_LENGTH):
             step_start = time.time()
-            q_norm = torch.clamp(q_norm + self.mdl(point_cloud, q_norm), min=-1, max=1)
+            q_norm = torch.clamp(q_norm + self.mdl(point_cloud, q_norm, target_pose_input), min=-1, max=1)
             qt = unnormalize_franka_joints(q_norm).type_as(q)
             assert isinstance(qt, torch.Tensor)
             trajectory.append(qt)
