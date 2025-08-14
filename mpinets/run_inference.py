@@ -326,6 +326,8 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
     cpu_fk_sampler = FrankaSampler("cpu", use_cache=True)
     gpu_fk_sampler = FrankaSampler("cuda:0", use_cache=True)
     sim = BulletController(hz=12, substeps=20, gui=True)
+
+    sim.set_camera_position(yaw=-70, pitch=-30, distance=1, target=[0.0, 0.0, 0.5])
     eval = Evaluator()
 
     # Load the meshcat visualizer to visualize point cloud (Pybullet is bad at point clouds)
@@ -438,7 +440,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "environment_type",
-        choices=["tabletop", "cubby", "merged-cubby", "dresser", "all"],
+        choices=["tabletop", "cubby", "merged-cubby", "dresser", "cabinet", "pillar", "all"],
         help="The environment class",
     )
     parser.add_argument(
