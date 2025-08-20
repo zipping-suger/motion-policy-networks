@@ -571,11 +571,16 @@ class Evaluator:
         :rtype Dict[str, float]: The metrics
         """
         success = percent_true(group["success"])
+        half_cm = percent_true(np.array(group["position_error"]) < 0.5)
         one_cm = percent_true(np.array(group["position_error"]) < 1)
         five_cm = percent_true(np.array(group["position_error"]) < 5)
+        five_deg = percent_true(np.array(group["orientation_error"]) < 5)
         fifteen_deg = percent_true(np.array(group["orientation_error"]) < 15)
         thirty_deg = percent_true(np.array(group["orientation_error"]) < 30)
         turn_around = percent_true(np.array(group["orientation_error"]) > 165)
+
+        avg_position_error = np.mean(group["position_error"])
+        avg_orientation_error = np.mean(group["orientation_error"])
 
         physical = percent_true(group["physical_violations"])
         config_smoothness = np.mean(group["config_smoothness"])
@@ -650,11 +655,15 @@ class Evaluator:
             "physical violations": physical,
             "average collision depth": 100 * np.mean(depths),
             "median collision depth": 100 * np.median(depths),
+            "0.5 cm": half_cm,  # Added
             "1 cm": one_cm,
             "5 cm": five_cm,
+            "5 deg": five_deg,  # Added
             "15 deg": fifteen_deg,
             "30 deg": thirty_deg,
             "165 deg": turn_around,
+            "average position error": avg_position_error,
+            "average orientation error": avg_orientation_error,
             "is smooth": is_smooth,
             "average config sparc": config_smoothness,
             "average eff sparc": eff_smoothness,
@@ -673,11 +682,15 @@ class Evaluator:
         print(f"Total problems: {metrics['total']}")
         print(f"# Skips (Hard Failures): {metrics['skips']}")
         print(f"% Success: {metrics['success']:4.2f}")
+        print(f"% Within 0.5cm: {metrics['0.5 cm']:4.2f}")
         print(f"% Within 1cm: {metrics['1 cm']:4.2f}")
         print(f"% Within 5cm: {metrics['5 cm']:4.2f}")
+        print(f"% Within 5deg: {metrics['5 deg']:4.2f}")  
         print(f"% Within 15deg: {metrics['15 deg']:4.2f}")
         print(f"% Within 30deg: {metrics['30 deg']:4.2f}")
         print(f"% Within 15deg of 180: {metrics['165 deg']:4.2f}")
+        print(f"Average Position Error (cm): {metrics['average position error']:4.2f}")
+        print(f"Average Orientation Error (deg): {metrics['average orientation error']:4.2f}")
         print(f"% With Environment Collision: {metrics['env collision']:4.2f}")
         print(f"% With Self Collision: {metrics['self collision']:4.2f}")
         print(f"% With Joint Limit Violations: {metrics['joint violation']:4.2f}")
