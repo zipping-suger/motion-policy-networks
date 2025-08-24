@@ -46,7 +46,7 @@ from copy import deepcopy
 
 # Maybe these can be removed if we have a different way of sending commands
 import sys
-from trajectory_msgs.msg import JointTrajectory
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from sensor_msgs.msg import JointState
 
 
@@ -136,6 +136,12 @@ class MPiNetsInterface:
             self.planning_callback,
             queue_size=5,
         )
+
+        self.gazebo_command_publisher = rospy.Publisher(
+            "/position_joint_trajectory_controller/command", 
+            JointTrajectory, 
+            queue_size=1
+        )
         time.sleep(1)
         self.reset_franka()
 
@@ -143,14 +149,28 @@ class MPiNetsInterface:
         """
         Resets the robot to the neutral pose and resets the current plan
         """
-        msg = JointState()
-        msg.header.stamp = rospy.Time.now()
-        msg.header.frame_id = "panda_link0"
-        msg.position = NEUTRAL_CONFIG
-        msg.name = JOINT_NAMES
+        rospy.loginfo("Resetting robot to neutral pose")
+
+        # Publish a JointTrajectory message to the Gazebo controller
+        traj_msg = JointTrajectory()
+        traj_msg.header.stamp = rospy.Time(0)  # FIX: Use zero timestamp
+        traj_msg.joint_names = JOINT_NAMES[:7]
+        point = JointTrajectoryPoint()
+        point.positions = NEUTRAL_CONFIG[:7].tolist()
+        point.time_from_start = rospy.Duration.from_sec(1.0)
+        traj_msg.points.append(point)
+        self.gazebo_command_publisher.publish(traj_msg)
+
+        # Publish a JointState message for visualization
+        joint_msg = JointState()
+        joint_msg.header.stamp = rospy.Time.now()
+        joint_msg.header.frame_id = "panda_link0"
+        joint_msg.position = NEUTRAL_CONFIG
+        joint_msg.name = JOINT_NAMES
+        self.joint_states_publisher.publish(joint_msg)
+        self.planned_joint_states_publisher.publish(joint_msg)
+
         self.visualize_plan = False
-        self.joint_states_publisher.publish(msg)
-        self.planned_joint_states_publisher.publish(msg)
         self.current_joint_state = NEUTRAL_CONFIG
         self.current_plan = []
 
@@ -445,6 +465,7 @@ class MPiNetsInterface:
 
         self.server.applyChanges()
 
+
     def execute_button_callback(self, feedback):
         """
         This is called whenever the execute button is clicked. It will move the "real"
@@ -452,7 +473,7 @@ class MPiNetsInterface:
         current "real" joint configuration to the end of the plan.
 
         :param feedback InteractiveMarkerFeedback: The feedback from interacting with the
-                                                   execute button
+                                                execute button
         """
         if feedback.event_type == InteractiveMarkerFeedback.BUTTON_CLICK:
             if len(self.current_plan) == 0:
@@ -460,6 +481,25 @@ class MPiNetsInterface:
                 return
             self.visualize_plan = False
             self.current_joint_state = self.current_plan[-1]
+
+            # Create and publish a JointTrajectory message for the Gazebo controller
+            joint_trajectory = JointTrajectory()
+            # FIX: Use zero timestamp for immediate execution in simulation
+            joint_trajectory.header.stamp = rospy.Time(0)  # Changed from rospy.Time.now()
+            joint_trajectory.header.frame_id = "panda_link0"
+            joint_trajectory.joint_names = JOINT_NAMES[:7]
+
+            time_step = 0.2  # Time step in seconds between each point
+            for ii, q in enumerate(self.current_plan):
+                point = JointTrajectoryPoint()
+                point.positions = q[:7]
+                # Set time from start as a cumulative sum of the time step
+                point.time_from_start = rospy.Duration.from_sec(time_step * (ii + 1))
+                joint_trajectory.points.append(point)
+
+            self.gazebo_command_publisher.publish(joint_trajectory)
+
+            # Publish JointState messages for visualization
             for q in self.current_plan:
                 joint_msg = JointState()
                 joint_msg.header.stamp = rospy.Time.now()
@@ -469,6 +509,7 @@ class MPiNetsInterface:
                 self.joint_states_publisher.publish(joint_msg)
                 self.planned_joint_states_publisher.publish(joint_msg)
                 rospy.sleep(0.12)
+
             self.current_plan = []
 
         self.server.applyChanges()

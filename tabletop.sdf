@@ -1,0 +1,325 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <model name="obstacles">
+    <link name="link_0">
+      <pose>0.8101467834292668 0.10807207644429961 0.017239837555798554 0.0 0.0 0.0</pose>
+      <visual name="visual_0">
+        <geometry>
+          <box>
+            <size>0.9754961767670788 1.4625566355520747 0.0744796751115971</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/Grey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+      <collision name="collision_0">
+        <geometry>
+          <box>
+            <size>0.9754961767670788 1.4625566355520747 0.0744796751115971</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1</mu>
+              <mu2>1</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+    <static>1</static>
+    <link name="link_1">
+      <pose>0.8101467834292668 1.2345108594554024 0.017239837555798554 0.0 0.0 0.0</pose>
+      <visual name="visual_1">
+        <geometry>
+          <box>
+            <size>0.9754961767670788 0.7903209304701311 0.0744796751115971</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/Grey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+      <collision name="collision_1">
+        <geometry>
+          <box>
+            <size>0.9754961767670788 0.7903209304701311 0.0744796751115971</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1</mu>
+              <mu2>1</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+    <static>1</static>
+    <link name="link_2">
+      <pose>-0.014353472603504778 -0.01901769466640707 -0.01 0.0 0.0 0.0</pose>
+      <visual name="visual_2">
+        <geometry>
+          <box>
+            <size>0.6735043352984644 0.9306543445147867 0.02</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/Grey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+      <collision name="collision_2">
+        <geometry>
+          <box>
+            <size>0.6735043352984644 0.9306543445147867 0.02</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1</mu>
+              <mu2>1</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+    <static>1</static>
+    <link name="link_3">
+      <pose>1.218301813910721 0.4218626756772822 0.18841944536093994 0.0 0.0 1.4942483861690181</pose>
+      <visual name="visual_3">
+        <geometry>
+          <box>
+            <size>0.0632713918307948 0.14979880931645792 0.2678795404986857</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/Grey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+      <collision name="collision_3">
+        <geometry>
+          <box>
+            <size>0.0632713918307948 0.14979880931645792 0.2678795404986857</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1</mu>
+              <mu2>1</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+    <static>1</static>
+    <link name="link_4">
+      <pose>0.6157568581657392 0.44335645136269364 0.13793017755549955 0.0 0.0 0.1815625687604088</pose>
+      <visual name="visual_4">
+        <geometry>
+          <box>
+            <size>0.07863818320035157 0.07945391425595395 0.1669010048878049</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/Grey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+      <collision name="collision_4">
+        <geometry>
+          <box>
+            <size>0.07863818320035157 0.07945391425595395 0.1669010048878049</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1</mu>
+              <mu2>1</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+    <static>1</static>
+    <link name="link_5">
+      <pose>0.8730942937828734 0.7590052431920166 0.09026910370419583 0.0 0.0 1.4932153691733698</pose>
+      <visual name="visual_5">
+        <geometry>
+          <box>
+            <size>0.10502196506189745 0.05290630050161831 0.07157885718519746</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/Grey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+      <collision name="collision_5">
+        <geometry>
+          <box>
+            <size>0.10502196506189745 0.05290630050161831 0.07157885718519746</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1</mu>
+              <mu2>1</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+    <static>1</static>
+    <link name="link_6">
+      <pose>1.078113569037598 0.3839014877822696 0.10001164868943499 0.0 0.0 1.1474784122054549</pose>
+      <visual name="visual_6">
+        <geometry>
+          <box>
+            <size>0.052427663491257326 0.0625452463666823 0.09106394715567578</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/Grey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+      <collision name="collision_6">
+        <geometry>
+          <box>
+            <size>0.052427663491257326 0.0625452463666823 0.09106394715567578</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1</mu>
+              <mu2>1</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+    <static>1</static>
+    <link name="link_7">
+      <pose>0.5272623236150856 0.24732774494720977 0.22523217166022202 0.0 0.0 0.540569614134878</pose>
+      <visual name="visual_7">
+        <geometry>
+          <box>
+            <size>0.07531060730378093 0.13423367004594983 0.34150499309724985</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/Grey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+      <collision name="collision_7">
+        <geometry>
+          <box>
+            <size>0.07531060730378093 0.13423367004594983 0.34150499309724985</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1</mu>
+              <mu2>1</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+    <static>1</static>
+    <link name="link_8">
+      <pose>1.1811909477859837 -0.47666864787883845 0.21049485211784966 0.0 0.0 0.04385746671100756</pose>
+      <visual name="visual_8">
+        <geometry>
+          <box>
+            <size>0.12162907447010808 0.05241762712192896 0.3120303540125051</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/Grey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+      <collision name="collision_8">
+        <geometry>
+          <box>
+            <size>0.12162907447010808 0.05241762712192896 0.3120303540125051</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1</mu>
+              <mu2>1</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+    <static>1</static>
+    <link name="link_9">
+      <pose>0.34455505057914604 -0.4055325870583578 0.15916772726484454 0.0 0.0 1.3118172256505896</pose>
+      <visual name="visual_9">
+        <geometry>
+          <box>
+            <size>0.11598712095689696 0.059856524684130386 0.2093761043064949</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <name>Gazebo/Grey</name>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+          </script>
+        </material>
+      </visual>
+      <collision name="collision_9">
+        <geometry>
+          <box>
+            <size>0.11598712095689696 0.059856524684130386 0.2093761043064949</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1</mu>
+              <mu2>1</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+    </link>
+    <static>1</static>
+  </model>
+</sdf>
