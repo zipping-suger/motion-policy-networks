@@ -248,19 +248,33 @@ if __name__ == "__main__":
         # Define a camera pose for rendering, this one is from `run_inference.py` for 'tabletop'
         # In a real application, this would be a real sensor pose.
         # You may need to change this based on the environment type.
+
+        # # tabletop camera pose
+        # cam_pose = SE3(
+        #     xyz=[1.5031788593125708, -1.817341016921562, 1.278088299149147],
+        #     quaternion=[0.8687241016192855, 0.4180885960330695, 0.11516106409944685, 0.23928704613569252],
+        # ).inverse
+
+        # cubby camera pose
         cam_pose = SE3(
-            xyz=[1.5031788593125708, -1.817341016921562, 1.278088299149147],
-            quaternion=[0.8687241016192855, 0.4180885960330695, 0.11516106409944685, 0.23928704613569252],
+            xyz=[0.08307640315968651, 1.986952324350807, 0.9996085854670145],
+            quaternion=[
+                -0.10162310189063647,
+                -0.06726290364234049,
+                0.5478233048853433,
+                0.8276702686337273,
+            ],
         ).inverse
+
         all_obstacle_points = convert_to_depth(problem, cam_pose)
-        
+
         # Sample NUM_OBSTACLE_POINTS from the full point cloud
         if len(all_obstacle_points) > NUM_OBSTACLE_POINTS:
             random_indices = np.random.choice(len(all_obstacle_points), size=NUM_OBSTACLE_POINTS, replace=False)
             obstacle_points = all_obstacle_points[random_indices, :]
         else:
             obstacle_points = all_obstacle_points
-            
+
         print("Using depth camera for obstacle point cloud.")
     else:
         obstacle_points = construct_mixed_point_cloud(problem.obstacles, NUM_OBSTACLE_POINTS)
