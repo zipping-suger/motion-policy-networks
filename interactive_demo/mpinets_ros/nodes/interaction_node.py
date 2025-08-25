@@ -67,12 +67,7 @@ NEUTRAL_CONFIG = np.array(
 
 # A neutral starting target (matches the end effector of the neutral start)
 NEUTRAL_TARGET_XYZ = [0.30649957127333377, 0.007287351995245575, 0.4866376674460814]
-NEUTRAL_TARGET_XYZW = [
-    -0.014241942613215233,
-    0.9996573431202568,
-    0.008466023255748396,
-    -0.02026548461261383,
-]
+NEUTRAL_TARGET_XYZW = [-0.99965734, -0.01424194, -0.02026548, -0.00846602]
 
 # The joint names. These would ideally be read from the URDF, but they are hard-coded
 # here out of laziness since this is meant to be a demo
@@ -109,7 +104,7 @@ class MPiNetsInterface:
         self.current_plan = []
         self.target_xyz = NEUTRAL_TARGET_XYZ
         self.target_xyzw = NEUTRAL_TARGET_XYZW
-        self.current_joint_state = NEUTRAL_CONFIG
+        self.current_joint_state = NEUTRAL_CONFIG.tolist()
         self.make_target_marker(
             self.target_xyz,
             self.target_xyzw,
@@ -130,6 +125,13 @@ class MPiNetsInterface:
             queue_size=1,
         )
 
+        self.real_joint_state_subscriber = rospy.Subscriber(
+            "/joint_states",
+            JointState,
+            self.real_joint_state_callback,
+            queue_size=1,
+        )
+
         self.planning_problem_subscriber = rospy.Subscriber(
             "/mpinets/plan",
             JointTrajectory,
@@ -138,9 +140,9 @@ class MPiNetsInterface:
         )
 
         self.gazebo_command_publisher = rospy.Publisher(
-            "/position_joint_trajectory_controller/command", 
-            JointTrajectory, 
-            queue_size=1
+            "/position_joint_trajectory_controller/command",
+            JointTrajectory,
+            queue_size=1,
         )
         time.sleep(1)
         self.reset_franka()
@@ -161,17 +163,17 @@ class MPiNetsInterface:
         traj_msg.points.append(point)
         self.gazebo_command_publisher.publish(traj_msg)
 
-        # Publish a JointState message for visualization
+        # Publish current joint state to visualization topics
         joint_msg = JointState()
         joint_msg.header.stamp = rospy.Time.now()
         joint_msg.header.frame_id = "panda_link0"
-        joint_msg.position = NEUTRAL_CONFIG
+        joint_msg.position = NEUTRAL_CONFIG.tolist()
+        self.current_joint_state = NEUTRAL_CONFIG.tolist()
         joint_msg.name = JOINT_NAMES
         self.joint_states_publisher.publish(joint_msg)
         self.planned_joint_states_publisher.publish(joint_msg)
 
         self.visualize_plan = False
-        self.current_joint_state = NEUTRAL_CONFIG
         self.current_plan = []
 
     @staticmethod
@@ -398,6 +400,13 @@ class MPiNetsInterface:
         self.server.insert(int_marker)
         self.server.setCallback(int_marker.name, self.target_feedback)
 
+    def real_joint_state_callback(self, msg):
+        """
+        Callback to continuously update current joint state from real robot
+        This ensures self.current_joint_state always matches the real robot state
+        """
+        self.current_joint_state = list(msg.position)
+
     def reset_button_callback(self, feedback):
         """
         A callback that's called after clicking on the reset button, resets the system
@@ -465,39 +474,40 @@ class MPiNetsInterface:
 
         self.server.applyChanges()
 
-
     def execute_button_callback(self, feedback):
         """
-        This is called whenever the execute button is clicked. It will move the "real"
-        robot according to the currently calculated plan. It will also reset the plan and
-        current "real" joint configuration to the end of the plan.
-
-        :param feedback InteractiveMarkerFeedback: The feedback from interacting with the
-                                                execute button
+        Execute the plan on the real robot and update current_joint_state to final position
         """
         if feedback.event_type == InteractiveMarkerFeedback.BUTTON_CLICK:
             if len(self.current_plan) == 0:
                 rospy.logwarn("There is no current plan. Plan before executing")
                 return
             self.visualize_plan = False
-            self.current_joint_state = self.current_plan[-1]
 
             # Create and publish a JointTrajectory message for the Gazebo controller
             joint_trajectory = JointTrajectory()
-            # FIX: Use zero timestamp for immediate execution in simulation
-            joint_trajectory.header.stamp = rospy.Time(0)  # Changed from rospy.Time.now()
+            joint_trajectory.header.stamp = rospy.Time(0)
             joint_trajectory.header.frame_id = "panda_link0"
             joint_trajectory.joint_names = JOINT_NAMES[:7]
 
-            time_step = 0.2  # Time step in seconds between each point
+            time_step = 0.2
             for ii, q in enumerate(self.current_plan):
                 point = JointTrajectoryPoint()
                 point.positions = q[:7]
-                # Set time from start as a cumulative sum of the time step
                 point.time_from_start = rospy.Duration.from_sec(time_step * (ii + 1))
                 joint_trajectory.points.append(point)
 
             self.gazebo_command_publisher.publish(joint_trajectory)
+
+            # Update current_joint_state to the final position of the plan
+            # This will be continuously updated by the real_joint_state_callback during execution
+            # Fallback: If /joint_states is not being published, update current_joint_state manually
+            # (Assume that if current_joint_state hasn't changed, we set it to the last plan)
+            if (
+                self.current_joint_state == NEUTRAL_CONFIG.tolist()
+                or self.current_joint_state == self.current_plan[0]
+            ):
+                self.current_joint_state = self.current_plan[-1]
 
             # Publish JointState messages for visualization
             for q in self.current_plan:

@@ -1,3 +1,25 @@
+# MIT License
+#
+# Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES, University of Washington. All rights reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a
+# copy of this software and associated documentation files (the "Software"),
+# to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense,
+# and/or sell copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+
 import numpy as np
 import cv2
 import time
@@ -10,7 +32,7 @@ import argparse
 import pickle
 
 from robofin.robots import FrankaRobot, FrankaGripper
-from robofin.bullet import BulletController
+from robofin.bullet import BulletController, Bullet
 from robofin.pointcloud.torch import FrankaSampler
 
 # Updated model import
@@ -31,7 +53,7 @@ def create_point_cloud(robot_points, obstacle_points, target_points):
     pc = torch.zeros(
         NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS + NUM_TARGET_POINTS,
         4,  # x,y,z + segmentation mask
-        device="cuda:0"
+        device="cuda:0",
     )
     # Robot points (mask=0)
     pc[:NUM_ROBOT_POINTS, :3] = robot_points
@@ -44,6 +66,7 @@ def create_point_cloud(robot_points, obstacle_points, target_points):
     pc[mid_start:mid_end, 3] = 1
 
     # Target points (mask=2)
+    mid_end = NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS
     pc[mid_end:, :3] = target_points
     pc[mid_end:, 3] = 2
 
@@ -69,41 +92,41 @@ def move_target_with_key(target_pose, key, pos_step=0.02, rot_step=5.0):
     so3 = target_pose.so3
 
     # Position changes
-    if key == ord('w'):
+    if key == ord("w"):
         xyz = xyz + np.array([0, pos_step, 0])
         moved = True
-    elif key == ord('s'):
+    elif key == ord("s"):
         xyz = xyz + np.array([0, -pos_step, 0])
         moved = True
-    elif key == ord('a'):
+    elif key == ord("a"):
         xyz = xyz + np.array([-pos_step, 0, 0])
         moved = True
-    elif key == ord('d'):
+    elif key == ord("d"):
         xyz = xyz + np.array([pos_step, 0, 0])
         moved = True
-    elif key == ord('q'):
+    elif key == ord("q"):
         xyz = xyz + np.array([0, 0, pos_step])
         moved = True
-    elif key == ord('e'):
+    elif key == ord("e"):
         xyz = xyz + np.array([0, 0, -pos_step])
         moved = True
 
     # Orientation changes (in gripper's local frame)
-    elif key in [ord('u'), ord('o'), ord('i'), ord('k'), ord('j'), ord('l')]:
+    elif key in [ord("u"), ord("o"), ord("i"), ord("k"), ord("j"), ord("l")]:
         rot_step_rad = np.radians(rot_step)
         R = so3.matrix
 
-        if key == ord('u'):  # Roll +
+        if key == ord("u"):  # Roll +
             dR = SO3.from_rpy(rot_step_rad, 0, 0).matrix
-        elif key == ord('o'):  # Roll -
+        elif key == ord("o"):  # Roll -
             dR = SO3.from_rpy(-rot_step_rad, 0, 0).matrix
-        elif key == ord('i'):  # Pitch +
+        elif key == ord("i"):  # Pitch +
             dR = SO3.from_rpy(0, rot_step_rad, 0).matrix
-        elif key == ord('k'):  # Pitch -
+        elif key == ord("k"):  # Pitch -
             dR = SO3.from_rpy(0, -rot_step_rad, 0).matrix
-        elif key == ord('j'):  # Yaw +
+        elif key == ord("j"):  # Yaw +
             dR = SO3.from_rpy(0, 0, rot_step_rad).matrix
-        elif key == ord('l'):  # Yaw -
+        elif key == ord("l"):  # Yaw -
             dR = SO3.from_rpy(0, 0, -rot_step_rad).matrix
 
         R_new = R @ dR
@@ -114,6 +137,21 @@ def move_target_with_key(target_pose, key, pos_step=0.02, rot_step=5.0):
     if moved:
         target_pose = SE3(xyz=xyz, so3=so3)
     return moved, target_pose
+
+
+def convert_to_depth(problem: PlanningProblem, cam_pose: SE3) -> np.ndarray:
+    """
+    Renders a point cloud from the environment using a simulated depth camera.
+    """
+    sim_depth = Bullet(gui=False)
+    franka_depth = sim_depth.load_robot(FrankaRobot)
+    franka_depth.marionette(problem.q0)
+    sim_depth.load_primitives(problem.obstacles)
+    obstacle_pc = sim_depth.get_pointcloud_from_camera(
+        cam_pose, remove_robot=franka_depth
+    )
+    sim_depth.clear_all_obstacles()
+    return obstacle_pc
 
 
 if __name__ == "__main__":
@@ -128,7 +166,16 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "environment_type",
-        choices=["tabletop", "cubby", "merged-cubby", "dresser", "free", "pillar", "cabinet", "all"],
+        choices=[
+            "tabletop",
+            "cubby",
+            "merged-cubby",
+            "dresser",
+            "free",
+            "pillar",
+            "cabinet",
+            "all",
+        ],
         help="The environment class to filter problems by, or 'all' for all environments",
     )
     parser.add_argument(
@@ -141,6 +188,11 @@ if __name__ == "__main__":
         type=int,
         default=0,
         help="The index of the problem to visualize within the filtered set of problems (default: 0)",
+    )
+    parser.add_argument(
+        "--use-depth",
+        action="store_true",
+        help="Use a depth camera to create the obstacle point cloud instead of primitive-based sampling.",
     )
     args = parser.parse_args()
 
@@ -156,9 +208,7 @@ if __name__ == "__main__":
     gripper = sim.load_robot(FrankaGripper, collision_free=True)
 
     # Set camera
-    sim.set_camera_position(
-        yaw=-90, pitch=-30, distance=2.5, target=[0.0, 0.0, 0.5]
-    )
+    sim.set_camera_position(yaw=-90, pitch=-30, distance=2.5, target=[0.0, 0.0, 0.5])
 
     # Load problems from pickle file
     with open(args.problems, "rb") as f:
@@ -178,21 +228,46 @@ if __name__ == "__main__":
             filtered_problems.extend(problem_list)
 
     if not filtered_problems:
-        print(f"No problems found for environment type '{args.environment_type}' and problem type '{args.problem_type}'. Exiting.")
+        print(
+            f"No problems found for environment type '{args.environment_type}' and problem type '{args.problem_type}'. Exiting."
+        )
         exit()
 
     if args.problem_idx >= len(filtered_problems) or args.problem_idx < 0:
-        raise IndexError(f"Problem index {args.problem_idx} out of range for the filtered set. There are {len(filtered_problems)} problems available. Max index is {len(filtered_problems) - 1}.")
+        raise IndexError(
+            f"Problem index {args.problem_idx} out of range for the filtered set. There are {len(filtered_problems)} problems available. Max index is {len(filtered_problems) - 1}."
+        )
 
     problem: PlanningProblem = filtered_problems[args.problem_idx]
-    print(f"\n======= Visualizing problem {args.problem_idx} (Env: {env_type_arg}, Problem Type: {problem_type_arg}) =======")
+    print(
+        f"\n======= Visualizing problem {args.problem_idx} (Env: {env_type_arg}, Problem Type: {problem_type_arg}) ======="
+    )
 
-    # Precompute obstacle points once
-    obstacle_points = construct_mixed_point_cloud(problem.obstacles, NUM_OBSTACLE_POINTS)
+    # Precompute obstacle points once based on the chosen method
+    if args.use_depth:
+        # Define a camera pose for rendering, this one is from `run_inference.py` for 'tabletop'
+        # In a real application, this would be a real sensor pose.
+        # You may need to change this based on the environment type.
+        cam_pose = SE3(
+            xyz=[1.5031788593125708, -1.817341016921562, 1.278088299149147],
+            quaternion=[0.8687241016192855, 0.4180885960330695, 0.11516106409944685, 0.23928704613569252],
+        ).inverse
+        all_obstacle_points = convert_to_depth(problem, cam_pose)
+        
+        # Sample NUM_OBSTACLE_POINTS from the full point cloud
+        if len(all_obstacle_points) > NUM_OBSTACLE_POINTS:
+            random_indices = np.random.choice(len(all_obstacle_points), size=NUM_OBSTACLE_POINTS, replace=False)
+            obstacle_points = all_obstacle_points[random_indices, :]
+        else:
+            obstacle_points = all_obstacle_points
+            
+        print("Using depth camera for obstacle point cloud.")
+    else:
+        obstacle_points = construct_mixed_point_cloud(problem.obstacles, NUM_OBSTACLE_POINTS)
+        print("Using primitive-based point cloud.")
+
     obstacle_points_tensor = torch.tensor(
-        obstacle_points[:, :3],
-        dtype=torch.float32,
-        device="cuda:0"
+        obstacle_points[:, :3], dtype=torch.float32, device="cuda:0"
     )
 
     # Load obstacles
@@ -237,22 +312,16 @@ if __name__ == "__main__":
 
             # Convert to tensor
             current_q = torch.tensor(
-                start_config,
-                dtype=torch.float32,
-                device="cuda:0"
+                start_config, dtype=torch.float32, device="cuda:0"
             ).unsqueeze(0)
             q_norm = normalize_franka_joints(current_q)
-            
-            
+
             # Construct target points
             target_pose_mat = torch.tensor(
-                target_pose.matrix,
-                dtype=torch.float32,
-                device="cuda:0"
+                target_pose.matrix, dtype=torch.float32, device="cuda:0"
             ).unsqueeze(0)
             target_points = gpu_fk_sampler.sample_end_effector(
-                target_pose_mat,
-                NUM_TARGET_POINTS
+                target_pose_mat, NUM_TARGET_POINTS
             ).squeeze(0)
 
             # Construct the target pose input for the model
@@ -263,7 +332,12 @@ if __name__ == "__main__":
             target_rot_mat = torch.as_tensor(
                 target_pose.matrix[:3, :3].flatten(), dtype=torch.float32
             )
-            target_pose_input = torch.cat((target_position, target_rot_mat), dim=0).float().unsqueeze(0).to(q_norm.device)
+            target_pose_input = (
+                torch.cat((target_position, target_rot_mat), dim=0)
+                .float()
+                .unsqueeze(0)
+                .to(q_norm.device)
+            )
 
             trajectory = []
             trajectory.append(start_config.copy())
@@ -271,15 +345,12 @@ if __name__ == "__main__":
             for i in range(MAX_ROLLOUT_LENGTH):
                 # Sample points
                 robot_points = gpu_fk_sampler.sample(
-                    current_q,
-                    NUM_ROBOT_POINTS
+                    current_q, NUM_ROBOT_POINTS
                 ).squeeze(0)
 
                 # Create point cloud
                 xyz = create_point_cloud(
-                    robot_points,
-                    obstacle_points_tensor,
-                    target_points
+                    robot_points, obstacle_points_tensor, target_points
                 )
 
                 # Policy prediction
@@ -291,7 +362,9 @@ if __name__ == "__main__":
 
                 # Check termination
                 current_ee = FrankaRobot.fk(current_config).xyz
-                distance = np.linalg.norm(np.array(current_ee) - np.array(target_pose.xyz))
+                distance = np.linalg.norm(
+                    np.array(current_ee) - np.array(target_pose.xyz)
+                )
                 if distance < GOAL_THRESHOLD:
                     print(f"Reached target in {i+1} steps!")
                     break
@@ -309,7 +382,9 @@ if __name__ == "__main__":
             # Store final configuration
             policy_final_config = trajectory[-1]
             policy_final_ee = FrankaRobot.fk(policy_final_config).xyz
-            error = np.linalg.norm(np.array(policy_final_ee) - np.array(target_pose.xyz))
+            error = np.linalg.norm(
+                np.array(policy_final_ee) - np.array(target_pose.xyz)
+            )
             print(f"Policy final position error: {error:.4f} m")
 
             # Pause at final pose

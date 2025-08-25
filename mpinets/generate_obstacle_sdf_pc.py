@@ -362,7 +362,7 @@ def save_pointcloud(point_cloud, output_path="obstacles.npy"):
     observation_data = {
         "pc": point_cloud,  # Nx3
         "camera_pose": np.eye(4),  # 4x4 identity (world frame)
-        "pc_color": np.ones_like(point_cloud),  # Nx3, white color
+        "pc_color": np.ones_like(point_cloud) * np.array([1.0, 1.0, 0.0]),  # Nx3, yellow color
         "label_map": {"robot": -1},  # Dummy label
         "pc_label": np.zeros(point_cloud.shape[0]),  # All zeros (not robot)
     }

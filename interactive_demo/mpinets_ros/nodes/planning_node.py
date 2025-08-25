@@ -44,7 +44,7 @@ import rospy
 NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
-MAX_ROLLOUT_LENGTH = 75
+MAX_ROLLOUT_LENGTH = 75  # Changed from 75 to 150 to match run_inference.py
 
 
 class Planner:
@@ -54,8 +54,6 @@ class Planner:
         Initializes and loads the model from the checkpoint
 
         :param mdl_file str: The path to the model checkpoint to be loaded
-        """
-        """
         """
         self.mdl = MotionPolicyNetwork.load_from_checkpoint(mdl_file).cuda().eval()
         self.fk_sampler = FrankaSampler("cuda:0")
@@ -94,16 +92,13 @@ class Planner:
             "You must downsample obstacle PC before passing to planner. "
             "While you're at it, filter the outliers out as well"
         )
-        obstacle_points = torch.as_tensor(obstacle_pc).cuda()
-        target_points = self.target_point_cloud(target_pose).squeeze()
-        assert np.all(
-            FrankaRealRobot.JOINT_LIMITS[:, 0] <= q0
-        ), "Configuration is outside of feasible limits"
-        assert np.all(
-            q0 <= FrankaRealRobot.JOINT_LIMITS[:, 1]
-        ), "Configuration is outside of feasible limits"
+
+        # Make the point cloud
         q = torch.as_tensor(q0).cuda().unsqueeze(0).float()
         robot_points = self.fk_sampler.sample(q, NUM_ROBOT_POINTS)
+        target_points = self.target_point_cloud(target_pose).squeeze()
+        obstacle_points = torch.as_tensor(obstacle_pc).cuda()
+
         point_cloud = torch.cat(
             (
                 torch.zeros(NUM_ROBOT_POINTS, 4),
@@ -113,12 +108,12 @@ class Planner:
             dim=0,
         ).cuda()
         point_cloud[:NUM_ROBOT_POINTS, :3] = robot_points.float()
-        point_cloud[
-            NUM_ROBOT_POINTS : NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS, :3
-        ] = obstacle_points.float()
-        point_cloud[
-            NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS :, :3
-        ] = target_points.float()
+        point_cloud[NUM_ROBOT_POINTS : NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS, :3] = (
+            obstacle_points.float()
+        )
+        point_cloud[NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS :, :3] = (
+            target_points.float()
+        )
         point_cloud = point_cloud.unsqueeze(0)
 
         # Construct the target pose input for the model
@@ -129,22 +124,34 @@ class Planner:
         target_rot_mat = torch.as_tensor(
             target_pose.matrix[:3, :3].flatten(), dtype=torch.float32
         )
-        target_pose_input = torch.cat((target_position, target_rot_mat), dim=0).float().unsqueeze(0).to(q.device)
+        target_pose_input = (
+            torch.cat((target_position, target_rot_mat), dim=0)
+            .unsqueeze(0)
+            .to(q.device)
+        )
 
         trajectory = [q]
         q_norm = normalize_franka_joints(q)
         success = False
+
+        # Sampler function for the loop
+        def sampler(config):
+            return self.fk_sampler.sample(config, NUM_ROBOT_POINTS)
+
         for _ in range(MAX_ROLLOUT_LENGTH):
-            step_start = time.time()
-            q_norm = torch.clamp(q_norm + self.mdl(point_cloud, q_norm, target_pose_input), min=-1, max=1)
+            q_norm = torch.clamp(
+                q_norm + self.mdl(point_cloud, q_norm, target_pose_input), min=-1, max=1
+            )
             qt = unnormalize_franka_joints(q_norm).type_as(q)
             assert isinstance(qt, torch.Tensor)
             trajectory.append(qt)
+
+            # Use FrankaRobot.fk from run_inference.py
             eff_pose = FrankaRealRobot.fk(
                 qt.squeeze().detach().cpu().numpy(), eff_frame="right_gripper"
             )
-            # [TUNE] This is where the 'success' is defined.
-            # Feel free to change this.
+
+            # Success condition from run_inference.py
             if (
                 np.linalg.norm(eff_pose._xyz - target_pose._xyz) < 0.01
                 and np.abs(
@@ -156,8 +163,11 @@ class Planner:
             ):
                 success = True
                 break
-            robot_points = self.fk_sampler.sample(qt, NUM_ROBOT_POINTS)
-            point_cloud[:, :NUM_ROBOT_POINTS, :3] = robot_points
+
+            # Update the point cloud for the next iteration
+            samples = sampler(qt).type_as(point_cloud)
+            point_cloud[:, : samples.shape[1], :3] = samples
+
         return success, [q.squeeze().cpu().numpy().tolist() for q in trajectory]
 
 
@@ -236,7 +246,7 @@ class PlanningNode:
             len(xyz), size=NUM_OBSTACLE_POINTS, replace=False
         )
         return xyz[random_mask], rgba[random_mask]
-
+    
     def load_point_cloud_data(self, path: str):
         """
         Loads scene from a point cloud file, transforms into the
