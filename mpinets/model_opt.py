@@ -11,6 +11,7 @@ from typing import List, Tuple, Sequence, Dict, Callable
 from mpinets.model import MPiNetsPointNet
 from robofin.robots import FrankaRealRobot
 from loss import compute_pose_loss_rotmat, collision_loss
+import torch.utils.checkpoint as checkpoint
 
 ROLLOUT_LENGTH = 69  # The trajectory length will be ROLLOUT_LENGTH + 1
 
@@ -63,7 +64,8 @@ class MotionPolicyNetwork(pl.LightningModule):
     def forward(
         self, xyz: torch.Tensor, q: torch.Tensor, target: torch.Tensor
     ) -> torch.Tensor:
-        pc_encoding = self.point_cloud_encoder(xyz)
+        # pc_encoding = self.point_cloud_encoder(xyz)
+        pc_encoding = checkpoint.checkpoint(self.point_cloud_encoder, xyz)
         config_encoding = self.config_encoder(q)
         target_encoding = self.target_encoder(target)
         x = torch.cat((pc_encoding, config_encoding, target_encoding), dim=1)
@@ -85,9 +87,9 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         self.collision_loss_weight = collision_loss_weight
         self.validation_step_outputs = []
 
-        # Freeze point cloud encoder
+        # Update the point cloud encoder or not
         for params in self.point_cloud_encoder.parameters():
-            params.requires_grad = False
+            params.requires_grad = True
 
     # def configure_optimizers(self):
     #     optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
@@ -99,11 +101,11 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
     #         "interval": "epoch",
     #     }
     #     return [optimizer], [scheduler]
-    
+
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
         return optimizer
-    
+
     def on_before_optimizer_step(self, optimizer, optimizer_idx=None):
         """
         PyTorch Lightning hook: clip gradients before optimizer step
@@ -146,7 +148,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
             with torch.no_grad():
                 samples = sampler(q_unnorm).type_as(xyz)
-                xyz[:, : samples.shape[1], :3] = samples
+                xyz[:, : samples.shape[1], :3] = samples.detach()
 
         return trajectory
 

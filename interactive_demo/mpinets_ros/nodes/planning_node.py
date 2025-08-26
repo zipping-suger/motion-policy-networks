@@ -218,30 +218,19 @@ class PlanningNode:
                                               downsized geometry information and color
                                               information
         """
-        # task_tabletop_mask = np.logical_and.reduce(
-        #     (
-        #         xyz[:, 0] > 0.25,
-        #         xyz[:, 0] < 1.35,
-        #         xyz[:, 1] > -0.3,
-        #         xyz[:, 1] < 1.6,
-        #         xyz[:, 2] > -0.05,
-        #         xyz[:, 2] < 0.35,
-        #     )
-        # )
+        workspace_mask = np.logical_and.reduce(
+            (
+                xyz[:, 0] > 0.1,
+                xyz[:, 0] < 1.5,
+                xyz[:, 1] > -1.5,
+                xyz[:, 1] < 1.5,
+                xyz[:, 2] > -0.05,
+                xyz[:, 2] < 1.5,
+            )
+        )
 
-        # mount_table_mask = np.logical_and.reduce(
-        #     (
-        #         xyz[:, 0] > -0.35,
-        #         xyz[:, 0] < 0.30,
-        #         xyz[:, 1] > -0.5,
-        #         xyz[:, 1] < 0.5,
-        #         xyz[:, 2] > -0.05,
-        #         xyz[:, 2] < 0.05,
-        #     )
-        # )
-        # workspace_mask = np.logical_or(task_tabletop_mask, mount_table_mask)
-        # xyz = xyz[workspace_mask]
-        # rgba = rgba[workspace_mask]
+        xyz = xyz[workspace_mask]
+        rgba = rgba[workspace_mask]
         random_mask = np.random.choice(
             len(xyz), size=NUM_OBSTACLE_POINTS, replace=False
         )

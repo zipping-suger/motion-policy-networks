@@ -477,6 +477,7 @@ class MPiNetsInterface:
     def execute_button_callback(self, feedback):
         """
         Execute the plan on the real robot and update current_joint_state to final position
+        Time step is based on the magnitude of the change of position
         """
         if feedback.event_type == InteractiveMarkerFeedback.BUTTON_CLICK:
             if len(self.current_plan) == 0:
@@ -490,11 +491,42 @@ class MPiNetsInterface:
             joint_trajectory.header.frame_id = "panda_link0"
             joint_trajectory.joint_names = JOINT_NAMES[:7]
 
-            time_step = 0.2
-            for ii, q in enumerate(self.current_plan):
+            # Parameters for time calculation
+            max_velocity = 0.5  # rad/s - adjust based on your robot's capabilities
+            min_time_step = 0.1  # seconds - minimum time between points
+            max_time_step = 1.0  # seconds - maximum time between points
+            
+            total_time = 0.0
+            
+            # Add first point at time 0
+            if len(self.current_plan) > 0:
+                first_point = JointTrajectoryPoint()
+                first_point.positions = self.current_plan[0][:7]
+                first_point.time_from_start = rospy.Duration.from_sec(total_time)
+                joint_trajectory.points.append(first_point)
+
+            # Calculate time steps based on position changes
+            for ii in range(1, len(self.current_plan)):
+                prev_q = self.current_plan[ii-1][:7]
+                curr_q = self.current_plan[ii][:7]
+                
+                # Calculate maximum joint position change
+                max_delta = max(abs(curr - prev) for curr, prev in zip(curr_q, prev_q))
+                
+                # Calculate required time based on velocity (time = distance/velocity)
+                if max_delta > 0:
+                    required_time = max_delta / max_velocity
+                else:
+                    required_time = min_time_step
+                    
+                # Apply bounds to the time step
+                time_step = max(min_time_step, min(required_time, max_time_step))
+                
+                total_time += time_step
+                
                 point = JointTrajectoryPoint()
-                point.positions = q[:7]
-                point.time_from_start = rospy.Duration.from_sec(time_step * (ii + 1))
+                point.positions = curr_q
+                point.time_from_start = rospy.Duration.from_sec(total_time)
                 joint_trajectory.points.append(point)
 
             self.gazebo_command_publisher.publish(joint_trajectory)

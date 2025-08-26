@@ -265,6 +265,17 @@ if __name__ == "__main__":
                 0.8276702686337273,
             ],
         ).inverse
+        
+        # # dresser camera pose
+        # cam_pose = SE3(
+        #     xyz=[0.08307640315968651, 1.986952324350807, 0.9996085854670145],
+        #     quaternion=[
+        #         -0.10162310189063647,
+        #         -0.06726290364234049,
+        #         0.5478233048853433,
+        #         0.8276702686337273,
+        #     ],
+        # ).inverse
 
         all_obstacle_points = convert_to_depth(problem, cam_pose)
 
