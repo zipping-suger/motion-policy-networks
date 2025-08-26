@@ -148,7 +148,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
             with torch.no_grad():
                 samples = sampler(q_unnorm).type_as(xyz)
-                xyz[:, : samples.shape[1], :3] = samples.detach()
+                xyz[:, : samples.shape[1], :3] = samples
 
         return trajectory
 

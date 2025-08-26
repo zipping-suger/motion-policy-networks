@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # --- Paths ---
-CONTAINER_IMAGE="/cluster/scratch/yixili/mpinets"
+CONTAINER_IMAGE="/cluster/scratch/yixili/mpinets.sif"
 CODE_DIR="/cluster/home/yixili/motion-policy-networks"
 DATA_DIR="/cluster/home/yixili/motion_policy/pretrain_data"
 CHECKPOINT_DIR="/cluster/home/yixili/motion-policy-networks/checkpoints"
