@@ -64,8 +64,8 @@ class MotionPolicyNetwork(pl.LightningModule):
     def forward(
         self, xyz: torch.Tensor, q: torch.Tensor, target: torch.Tensor
     ) -> torch.Tensor:
-        pc_encoding = self.point_cloud_encoder(xyz)
-        # pc_encoding = checkpoint.checkpoint(self.point_cloud_encoder, xyz)
+        # pc_encoding = self.point_cloud_encoder(xyz)
+        pc_encoding = checkpoint.checkpoint(self.point_cloud_encoder, xyz)
         config_encoding = self.config_encoder(q)
         target_encoding = self.target_encoder(target)
         x = torch.cat((pc_encoding, config_encoding, target_encoding), dim=1)
@@ -89,7 +89,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
         # Update the point cloud encoder or not
         for params in self.point_cloud_encoder.parameters():
-            params.requires_grad = False
+            params.requires_grad = True
 
     # def configure_optimizers(self):
     #     optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
