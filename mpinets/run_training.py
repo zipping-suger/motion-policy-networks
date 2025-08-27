@@ -83,7 +83,7 @@ def setup_trainer(
     ):
         args = {
             **args,
-            "strategy": DDPStrategy(find_unused_parameters=False),
+            "strategy": DDPStrategy(find_unused_parameters=True),
         }
     if validation_interval is not None:
         args = {**args, "val_check_interval": validation_interval}
