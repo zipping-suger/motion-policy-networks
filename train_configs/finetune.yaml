@@ -19,7 +19,7 @@ checkpoint_interval: 10
 validation_interval: 10
 gpus: 1 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/finetune_with_new_cabinet_data
+save_checkpoint_dir: /workspace/finetune_with_new_cabinet_data_fixed_pc_encoder
 max_epochs: 50
-experiment_name: finetune_with_new_cabinet_data
-description: "Best model finetuned on cabinet_6k dataset"
+experiment_name: finetune_with_new_cabinet_data_fixed_pc_encoder
+description: "Best model finetuned on cabinet_6k dataset with point cloud encoder frozen."
