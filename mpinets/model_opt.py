@@ -105,7 +105,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
         return optimizer
-
+    
     def on_before_optimizer_step(self, optimizer, optimizer_idx=None):
         """
         PyTorch Lightning hook: clip gradients before optimizer step
