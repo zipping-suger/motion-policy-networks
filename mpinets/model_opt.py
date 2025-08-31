@@ -1,6 +1,7 @@
 import torch
 from torch import nn
-from robofin.pointcloud.torch import FrankaSampler, FrankaCollisionSampler
+from utils import FrankaSampler  # In order to compute self-collision loss
+from robofin.pointcloud.torch import FrankaCollisionSampler
 import pytorch_lightning as pl
 from pointnet2_ops.pointnet2_modules import PointnetSAModule
 
@@ -14,6 +15,26 @@ from loss import compute_pose_loss_rotmat, collision_loss
 import torch.utils.checkpoint as checkpoint
 
 ROLLOUT_LENGTH = 69  # The trajectory length will be ROLLOUT_LENGTH + 1
+
+# Self-collision pairs for Franka Emika Panda robot
+FRANKA_SELF_COLLISION_PAIRS = [
+    ('panda_link0', 'panda_link2'), ('panda_link0', 'panda_link3'),
+    ('panda_link0', 'panda_link4'), ('panda_link0', 'panda_link5'),
+    ('panda_link0', 'panda_link6'), ('panda_link0', 'panda_link7'),
+    ('panda_link0', 'panda_hand'),
+    ('panda_link1', 'panda_link3'), ('panda_link1', 'panda_link4'),
+    ('panda_link1', 'panda_link5'), ('panda_link1', 'panda_link6'),
+    ('panda_link1', 'panda_link7'), ('panda_link1', 'panda_hand'),
+    ('panda_link2', 'panda_link4'), ('panda_link2', 'panda_link5'),
+    ('panda_link2', 'panda_link6'), ('panda_link2', 'panda_link7'),
+    ('panda_link2', 'panda_hand'),
+    ('panda_link3', 'panda_link5'), ('panda_link3', 'panda_link6'),
+    ('panda_link3', 'panda_link7'), ('panda_link3', 'panda_hand'),
+    ('panda_link4', 'panda_link6'), ('panda_link4', 'panda_link7'),
+    ('panda_link4', 'panda_hand'),
+    ('panda_link5', 'panda_hand'),
+    # Note: 'panda_hand' in the robofin URDF includes the gripper fingers.
+]
 
 
 class MotionPolicyNetwork(pl.LightningModule):
@@ -78,6 +99,8 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         num_robot_points: int,
         goal_loss_weight: float,
         collision_loss_weight: float,
+        self_collision_loss_weight: float = 20.0,  # New weight for self-collision
+        use_self_collision: bool = True,  # Flag to enable/disable self-collision loss
     ):
         super().__init__()
         self.num_robot_points = num_robot_points
@@ -85,22 +108,13 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         self.collision_sampler = None
         self.goal_loss_weight = goal_loss_weight
         self.collision_loss_weight = collision_loss_weight
+        self.self_collision_loss_weight = self_collision_loss_weight
+        self.use_self_collision = use_self_collision
         self.validation_step_outputs = []
 
         # Update the point cloud encoder or not
         for params in self.point_cloud_encoder.parameters():
             params.requires_grad = True
-
-    # def configure_optimizers(self):
-    #     optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
-    #     # Cosine annealing with warm restarts
-    #     scheduler = {
-    #         "scheduler": torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    #             optimizer, T_0=1, T_mult=2, eta_min=1e-6
-    #         ),
-    #         "interval": "epoch",
-    #     }
-    #     return [optimizer], [scheduler]
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
@@ -204,8 +218,10 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
         # Sum collision loss for each configuration in the rollout
         total_colli_loss = 0.0
+        total_self_colli_loss = 0.0
 
         for q in rollout:
+            # Environment collision loss
             input_pc = self.fk_sampler.sample(q, self.num_robot_points)
             colli_loss = collision_loss(
                 input_pc,
@@ -218,16 +234,45 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
                 cylinder_quats,
             )
             total_colli_loss += colli_loss
+            
+            # Self-collision loss (only if enabled)
+            if self.use_self_collision:
+                # Sample point clouds per link
+                per_link_pcs = self.fk_sampler.sample_per_link(q, total_points=self.num_robot_points)
+                
+                for link_a_name, link_b_name in FRANKA_SELF_COLLISION_PAIRS:
+                    if link_a_name in per_link_pcs and link_b_name in per_link_pcs:
+                        pc_a = per_link_pcs[link_a_name]  # Shape: (B, K_a, 3)
+                        pc_b = per_link_pcs[link_b_name]  # Shape: (B, K_b, 3)
 
-        train_loss = (
-            self.goal_loss_weight * goal_loss
-            + self.collision_loss_weight * total_colli_loss
-        )
+                        # Batched distance computation
+                        dists = torch.cdist(pc_a, pc_b)  # Shape: (B, K_a, K_b)
+
+                        # Find the minimum distance for each batch
+                        min_dists = torch.min(dists.view(dists.shape[0], -1), dim=1)[0]  # Shape: (B,)
+
+                        # Hinge loss for self-collision
+                        self_colli_loss = torch.sum(torch.clamp(0.03 - min_dists, min=0))
+                        total_self_colli_loss += self_colli_loss
+
+        # Calculate total loss with optional self-collision component
+        if self.use_self_collision:
+            train_loss = (
+                self.goal_loss_weight * goal_loss
+                + self.collision_loss_weight * total_colli_loss
+                + self.self_collision_loss_weight * total_self_colli_loss
+            )
+        else:
+            train_loss = (
+                self.goal_loss_weight * goal_loss
+                + self.collision_loss_weight * total_colli_loss
+            )
 
         return (
             train_loss,
             goal_loss,
             total_colli_loss,
+            total_self_colli_loss,
             torch.mean(position_loss),
             torch.mean(rotation_loss),
         )
@@ -254,13 +299,15 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             )
         rollout = self.rollout(batch, ROLLOUT_LENGTH, self.sample)
 
-        train_loss, goal_loss, colli_loss, position_loss, rotation_loss = (
+        train_loss, goal_loss, colli_loss, self_colli_loss, position_loss, rotation_loss = (
             self.eval_rollout(rollout, batch)
         )
 
         self.log("train_loss", train_loss)
         self.log("goal_loss", goal_loss)
         self.log("colli_loss", colli_loss)
+        if self.use_self_collision:
+            self.log("self_colli_loss", self_colli_loss)
         self.log("position_loss", position_loss)
         self.log("rotation_loss", rotation_loss)
         return train_loss
