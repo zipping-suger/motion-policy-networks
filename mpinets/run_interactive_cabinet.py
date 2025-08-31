@@ -41,14 +41,16 @@ from mpinets.model import MotionPolicyNetwork
 from mpinets.utils import normalize_franka_joints, unnormalize_franka_joints
 from mpinets.geometry import construct_mixed_point_cloud
 
+# Import the cabinet environment
+from environments.cabinet_environment import Cabinet
+
 NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
 MAX_ROLLOUT_LENGTH = 75
-GOAL_THRESHOLD = 0.01  # 1 cm threshold for goal reaching
+GOAL_THRESHOLD = 0.02  # 1 cm threshold for goal reaching
 
-
-class DynamicObstacleDemo:
+class CabinetInteractiveDemo:
     def __init__(self, mdl_path):
         # Load MotionPolicyNetwork
         self.model = MotionPolicyNetwork.load_from_checkpoint(mdl_path).cuda()
@@ -58,50 +60,65 @@ class DynamicObstacleDemo:
         self.gpu_fk_sampler = FrankaSampler("cuda:0", use_cache=True)
         
         # Initialize simulation
-        self.sim = BulletController(hz=8, substeps=80, gui=True)
+        self.sim = BulletController(hz=5, substeps=100, gui=True)
         self.franka = self.sim.load_robot(FrankaRobot)
         
         # Set camera
         self.sim.set_camera_position(yaw=-90, pitch=-30, distance=2.5, target=[0.0, 0.0, 0.5])
         
-        # Define two target poses for the robot to alternate between using midpoint RPY
-        p1 = [0.3, 0.4, 0.5]
-        roll1 = np.pi
-        pitch1 = 0
-        yaw1 = 0
-        self.target1 = SE3(xyz=p1, so3=SO3.from_rpy(roll1, pitch1, yaw1))
-
-        p2 = [0.3, -0.4, 0.5]
-        roll2 = np.pi
-        pitch2 = 0
-        yaw2 = 0
-        self.target2 = SE3(xyz=p2, so3=SO3.from_rpy(roll2, pitch2, yaw2))
+        # Create cabinet
+        self.cabinet = Cabinet()
+        self.cabinet.cabinet_left = 0.35
+        self.cabinet.cabinet_right = -0.35
+        self.cabinet.cabinet_bottom = 0.2
+        self.cabinet.cabinet_front = 0.4
+        self.cabinet.cabinet_back = 0.9
+        self.cabinet.cabinet_top = 1.0
+        self.cabinet.thickness = 0.02
+        self.cabinet.in_cabinet_rotation = 0
+        self.cabinet.left_open_angle = np.pi/2  
+        self.cabinet.right_open_angle = np.pi/4 
         
-        self.current_target = self.target1
+        # Load cabinet into simulation
+        self.cabinet_cuboids = self.cabinet.cuboids
+        self.cabinet_ids = self.sim.load_primitives(self.cabinet_cuboids, color=[0.7, 0.5, 0.3, 1])
+        
+        # Define target poses (inside and outside the cabinet)
+        p_inside = [0.6, 0.0, 0.5]  # Inside the cabinet
+        roll_inside = np.pi
+        pitch_inside = 0
+        yaw_inside = 0
+        self.target_inside = SE3(xyz=p_inside, so3=SO3.from_rpy(roll_inside, pitch_inside, yaw_inside))
+        
+        # Use a neutral pose for the outside target
+        neutral_config = np.array([
+            -0.017792060227770554,
+            -0.7601235411041661,
+            0.019782607023391807,
+            -2.342050140544315,
+            0.029840531355804868,
+            1.5411935298621688,
+           0.7534486589746342,
+        ])
+        self.target_outside = FrankaRobot.fk(neutral_config, eff_frame="right_gripper")
+        
+        self.current_target = self.target_inside
         
         # Create visual markers for targets
-        self.target_gripper1 = self.sim.load_robot(FrankaGripper, collision_free=True)
-        self.target_gripper2 = self.sim.load_robot(FrankaGripper, collision_free=True)
-        self.target_gripper1.marionette(self.target1)
-        self.target_gripper2.marionette(self.target2)
+        self.target_gripper_inside = self.sim.load_robot(FrankaGripper, collision_free=True)
+        self.target_gripper_outside = self.sim.load_robot(FrankaGripper, collision_free=True)
+        self.target_gripper_inside.marionette(self.target_inside)
+        self.target_gripper_outside.marionette(self.target_outside)
         
-        # Create a dynamic obstacle (cuboid) with identity quaternion
-        self.obstacle = Cuboid(center=[0.3, 0.0, 0.25], dims=[0.2, 0.05, 0.2], quaternion=[1, 0, 0, 0])
-        # Load the obstacle and store its ID
-        self.obstacle_ids = self.sim.load_primitives([self.obstacle], color=[0.8, 0.2, 0.2, 1])
-        self.obstacle_id = self.obstacle_ids[0]  # Get the first (and only) obstacle ID
-        
-        # Start with the robot at target1
-        self.franka.marionette(self.get_config_for_target(self.target1))
+        # Start with the robot at the neutral pose (outside target)
+        self.franka.marionette(neutral_config)
         
         # Control variables
-        self.obstacle_velocity = np.array([0.0, 0.0, 0.0])
         self.running = True
-        self.control_window_name = "Obstacle Control"
+        self.control_window_name = "Cabinet Door Control"
         
     def get_config_for_target(self, target):
-        # Simple IK approximation - in a real scenario, you'd use proper IK
-        # This is just a rough approximation for demonstration
+        # Simple IK approximation
         direction = target.xyz - np.array([0.0, 0.0, 0.5])
         direction = direction / np.linalg.norm(direction)
         
@@ -132,52 +149,32 @@ class DynamicObstacleDemo:
 
         return pc.unsqueeze(0)  # Add batch dimension
     
-    def move_obstacle_with_key(self, key, pos_step=0.05):
-        moved = False
-        center = np.array(self.obstacle.center)
+    def update_cabinet_doors(self, left_angle=None, right_angle=None):
+        if left_angle is not None:
+            self.cabinet.left_open_angle = left_angle
+        if right_angle is not None:
+            self.cabinet.right_open_angle = right_angle
         
-        # Position changes
-        if key == ord("w"):
-            center = center + np.array([0, pos_step, 0])
-            moved = True
-        elif key == ord("s"):
-            center = center + np.array([0, -pos_step, 0])
-            moved = True
-        elif key == ord("a"):
-            center = center + np.array([-pos_step, 0, 0])
-            moved = True
-        elif key == ord("d"):
-            center = center + np.array([pos_step, 0, 0])
-            moved = True
-        elif key == ord("q"):
-            center = center + np.array([0, 0, pos_step])
-            moved = True
-        elif key == ord("e"):
-            center = center + np.array([0, 0, -pos_step])
-            moved = True
-            
-        if moved:
-            self.obstacle.center = center
-            # Update the obstacle in simulation using the proper method
-            # Remove the old obstacle and create a new one at the new position
-            self.sim.clear_all_obstacles()
-            self.obstacle_ids = self.sim.load_primitives([self.obstacle], color=[0.8, 0.2, 0.2, 1])
-            self.obstacle_id = self.obstacle_ids[0]
-        return moved
+        # Update cabinet in simulation
+        self.sim.clear_all_obstacles()
+        self.cabinet_cuboids = self.cabinet.cuboids
+        self.cabinet_ids = self.sim.load_primitives(self.cabinet_cuboids, color=[0.7, 0.5, 0.3, 1])
     
-    def control_obstacle(self):
+    def control_cabinet_doors(self):
         cv2.namedWindow(self.control_window_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.control_window_name, 400, 200)  # Increased height for new text
+        cv2.resizeWindow(self.control_window_name, 400, 200)
         
         control_img = np.zeros((200, 400, 3), dtype=np.uint8)
-        cv2.putText(control_img, "WASD: Move XY", (10, 20), 
+        cv2.putText(control_img, "Q/A: Left Door +/-", (10, 20), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.putText(control_img, "Q/E: Move Z", (10, 40), 
+        cv2.putText(control_img, "W/S: Right Door +/-", (10, 40), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         cv2.putText(control_img, "T: Toggle Target", (10, 60), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         cv2.putText(control_img, "ESC: Exit", (10, 80), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        angle_step = np.pi / 36  # 5 degrees
         
         while self.running:
             cv2.imshow(self.control_window_name, control_img)
@@ -185,40 +182,51 @@ class DynamicObstacleDemo:
             if key == 27:  # ESC
                 self.running = False
                 break
+            elif key == ord('q'):  # Increase left door angle
+                new_angle = min(self.cabinet.left_open_angle + angle_step, np.pi)
+                self.update_cabinet_doors(left_angle=new_angle)
+            elif key == ord('a'):  # Decrease left door angle
+                new_angle = max(self.cabinet.left_open_angle - angle_step, 0)
+                self.update_cabinet_doors(left_angle=new_angle)
+            elif key == ord('w'):  # Increase right door angle
+                new_angle = min(self.cabinet.right_open_angle + angle_step, np.pi)
+                self.update_cabinet_doors(right_angle=new_angle)
+            elif key == ord('s'):  # Decrease right door angle
+                new_angle = max(self.cabinet.right_open_angle - angle_step, 0)
+                self.update_cabinet_doors(right_angle=new_angle)
             elif key == ord('t'):  # Toggle target
-                if np.array_equal(self.current_target.xyz, self.target1.xyz):
-                    self.current_target = self.target2
+                if self.current_target == self.target_inside:
+                    self.current_target = self.target_outside
                 else:
-                    self.current_target = self.target1
-                print(f"Switched target to position {self.current_target.xyz}")
-            else:
-                self.move_obstacle_with_key(key)
+                    self.current_target = self.target_inside
+                print(f"Switched target to {'inside' if self.current_target == self.target_inside else 'outside'} the cabinet")
+            
             time.sleep(0.03)
         
         cv2.destroyWindow(self.control_window_name)
     
     def run(self):
-        # Start obstacle control thread
-        control_thread = threading.Thread(target=self.control_obstacle)
+        # Start cabinet control thread
+        control_thread = threading.Thread(target=self.control_cabinet_doors)
         control_thread.daemon = True
         control_thread.start()
         
-        print("Starting dynamic obstacle demo...")
-        print("Use WASD (XY), QE (Z) to move the obstacle.")
-        print("Press T to toggle between targets.")
+        print("Starting cabinet interactive demo...")
+        print("Use Q/A to control left door, W/S to control right door.")
+        print("Press T to toggle between inside/outside targets.")
         print("Press ESC in the control window to exit.")
         
-        # Precompute obstacle points (we'll update the position in the loop)
-        obstacle_points = construct_mixed_point_cloud([self.obstacle], NUM_OBSTACLE_POINTS)
-        obstacle_points_tensor = torch.tensor(
-            obstacle_points[:, :3], dtype=torch.float32, device="cuda:0"
+        # Precompute cabinet points
+        cabinet_points = construct_mixed_point_cloud(self.cabinet_cuboids, NUM_OBSTACLE_POINTS)
+        cabinet_points_tensor = torch.tensor(
+            cabinet_points[:, :3], dtype=torch.float32, device="cuda:0"
         )
         
         while self.running:
-            # Update obstacle points based on current position
-            obstacle_points = construct_mixed_point_cloud([self.obstacle], NUM_OBSTACLE_POINTS)
-            obstacle_points_tensor = torch.tensor(
-                obstacle_points[:, :3], dtype=torch.float32, device="cuda:0"
+            # Update cabinet points if doors have moved
+            cabinet_points = construct_mixed_point_cloud(self.cabinet_cuboids, NUM_OBSTACLE_POINTS)
+            cabinet_points_tensor = torch.tensor(
+                cabinet_points[:, :3], dtype=torch.float32, device="cuda:0"
             )
             
             # Get current robot configuration
@@ -260,7 +268,7 @@ class DynamicObstacleDemo:
 
             # Create point cloud
             xyz = self.create_point_cloud(
-                robot_points, obstacle_points_tensor, target_points
+                robot_points, cabinet_points_tensor, target_points
             )
 
             # Policy prediction
@@ -284,7 +292,7 @@ class DynamicObstacleDemo:
             if distance < GOAL_THRESHOLD:
                 print(f"Reached target at {self.current_target.xyz}!")
         
-        print("Exiting dynamic obstacle demo.")
+        print("Exiting cabinet interactive demo.")
 
 
 if __name__ == "__main__":
@@ -294,7 +302,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     
-    demo = DynamicObstacleDemo(args.mdl_path)
+    demo = CabinetInteractiveDemo(args.mdl_path)
     try:
         demo.run()
     except KeyboardInterrupt:
