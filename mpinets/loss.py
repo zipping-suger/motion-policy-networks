@@ -260,7 +260,7 @@ def trajectory_opt_pointcld_self_collision(
     orientation_weight: float = 0.1,
     smoothness_weight: float = 1.0,
     collision_weight: float = 20.0,
-    self_collision_weight: float = 50.0,  # New: Weight for self-collision
+    self_collision_weight: float = 80.0,  # New: Weight for self-collision
     collision_threshold: float = 0.03,
     num_robot_points: int = 512,
     freeze_first_config: bool = True,

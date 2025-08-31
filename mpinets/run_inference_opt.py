@@ -48,7 +48,7 @@ import trimesh
 import meshcat
 import urchin
 
-from loss import trajectory_opt_pointcld
+from loss import trajectory_opt_pointcld, trajectory_opt_pointcld_self_collision
 
 END_EFFECTOR_FRAME = "right_gripper"
 NUM_ROBOT_POINTS = 2048
@@ -301,7 +301,7 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
                     point_cloud.unsqueeze(0).cuda(),
                     gpu_fk_sampler,
                 )
-                trajectory = trajectory_opt_pointcld(
+                trajectory = trajectory_opt_pointcld_self_collision(
                     trajectory, 
                     problem.target, 
                     construct_mixed_point_cloud(problem.obstacles, 2048)[:, :3],
@@ -379,7 +379,7 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
                     point_cloud.unsqueeze(0).cuda(),
                     gpu_fk_sampler,
                 )
-                trajectory = trajectory_opt_pointcld(
+                trajectory = trajectory_opt_pointcld_self_collision(
                     trajectory, 
                     problem.target, 
                     construct_mixed_point_cloud(problem.obstacles, 2048)[:, :3],
@@ -455,7 +455,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "environment_type",
-        choices=["tabletop", "cubby", "merged-cubby", "dresser", "all"],
+        choices=["tabletop", "cubby", "merged-cubby", "dresser", "cabinet", "all"],
         help="The environment class",
     )
     parser.add_argument(
