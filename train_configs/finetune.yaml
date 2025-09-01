@@ -19,7 +19,7 @@ checkpoint_interval: 10
 validation_interval: 10
 gpus: 6 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/finetune_with_new_cabinet_data_30k_self_collision
+save_checkpoint_dir: /workspace/finetune_with_new_cabinet_data_30k_self_collision_weight_2
 max_epochs: 50
-experiment_name: finetune_with_new_cabinet_data_30k_self_collision
+experiment_name: finetune_with_new_cabinet_data_30k_self_collision_weight_2
 description: "Best model finetuned on cabinet_30k dataset with self-collision loss"

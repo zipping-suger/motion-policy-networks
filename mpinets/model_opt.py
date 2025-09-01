@@ -99,7 +99,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         num_robot_points: int,
         goal_loss_weight: float,
         collision_loss_weight: float,
-        self_collision_loss_weight: float = 20.0,  # New weight for self-collision
+        self_collision_loss_weight: float = 2.0,  # New weight for self-collision
         use_self_collision: bool = True,  # Flag to enable/disable self-collision loss
     ):
         super().__init__()
