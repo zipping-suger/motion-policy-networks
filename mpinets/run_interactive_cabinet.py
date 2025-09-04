@@ -71,20 +71,20 @@ class CabinetInteractiveDemo:
         self.cabinet.cabinet_left = 0.35
         self.cabinet.cabinet_right = -0.35
         self.cabinet.cabinet_bottom = 0.2
-        self.cabinet.cabinet_front = 0.4
+        self.cabinet.cabinet_front = 0.5
         self.cabinet.cabinet_back = 0.9
         self.cabinet.cabinet_top = 1.0
         self.cabinet.thickness = 0.02
         self.cabinet.in_cabinet_rotation = 0
         self.cabinet.left_open_angle = np.pi/2  
-        self.cabinet.right_open_angle = np.pi/4 
+        self.cabinet.right_open_angle = np.pi/2 
         
         # Load cabinet into simulation
         self.cabinet_cuboids = self.cabinet.cuboids
         self.cabinet_ids = self.sim.load_primitives(self.cabinet_cuboids, color=[0.7, 0.5, 0.3, 1])
         
         # Define target poses (inside and outside the cabinet)
-        p_inside = [0.6, 0.0, 0.5]  # Inside the cabinet
+        p_inside = [0.7, 0.0, 0.3]  # Inside the cabinet
         roll_inside = np.pi
         pitch_inside = 0
         yaw_inside = 0
