@@ -16,6 +16,15 @@ import torch.utils.checkpoint as checkpoint
 
 ROLLOUT_LENGTH = 69  # The trajectory length will be ROLLOUT_LENGTH + 1
 
+# attached_primitive = None
+attached_primitive = {
+    'type': 'cuboid',
+    'dims': [0.05, 0.05, 0.2],
+    'num_points': 300,
+    'offset': [0, 0, 0.1],  # 10cm in front of the end-effector
+    'offset_quaternion': [1, 0, 0, 0]  # No rotation offset (identity quaternion)
+}
+
 # Self-collision pairs for Franka Emika Panda robot
 FRANKA_SELF_COLLISION_PAIRS = [
     ('panda_link0', 'panda_link2'), ('panda_link0', 'panda_link3'),
@@ -100,7 +109,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         goal_loss_weight: float,
         collision_loss_weight: float,
         self_collision_loss_weight: float = 2.0,  # New weight for self-collision
-        use_self_collision: bool = True,  # Flag to enable/disable self-collision loss
+        use_self_collision: bool = False,  # Flag to enable/disable self-collision loss
     ):
         super().__init__()
         self.num_robot_points = num_robot_points
@@ -214,7 +223,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         )
 
         if self.fk_sampler is None:
-            self.fk_sampler = FrankaSampler(self.device, use_cache=True)
+            self.fk_sampler = FrankaSampler(self.device, use_cache=True, attached_primitive=attached_primitive)
 
         # Sum collision loss for each configuration in the rollout
         total_colli_loss = 0.0
@@ -292,7 +301,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         """
         # Rollout the trajectory
         if self.fk_sampler is None:
-            self.fk_sampler = FrankaSampler(self.device, use_cache=True)
+            self.fk_sampler = FrankaSampler(self.device, use_cache=True, attached_primitive=attached_primitive)
         if self.collision_sampler is None:
             self.collision_sampler = FrankaCollisionSampler(
                 self.device, with_base_link=False
@@ -339,7 +348,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
         with torch.no_grad():
             if self.fk_sampler is None:
-                self.fk_sampler = FrankaSampler(self.device, use_cache=True)
+                self.fk_sampler = FrankaSampler(self.device, use_cache=True, attached_primitive=attached_primitive)
             if self.collision_sampler is None:
                 self.collision_sampler = FrankaCollisionSampler(
                     self.device, with_base_link=False

@@ -57,7 +57,7 @@ GOAL_THRESHOLD = 0.01  # 1 cm threshold for goal reaching
 attached_primitive = {
     'type': 'cuboid',
     'dims': [0.05, 0.05, 0.2],
-    'num_points': 800,
+    'num_points': 300,
     'offset': [0, 0, 0.1],  # 10cm in front of the end-effector
     'offset_quaternion': [1, 0, 0, 0]  # No rotation offset (identity quaternion)
 }
