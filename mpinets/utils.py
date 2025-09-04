@@ -91,11 +91,13 @@ class FrankaSampler:
         use_cache=False,
         default_prismatic_value=0.025,
         with_base_link=True,
+        attached_primitive=None
     ):
         logging.getLogger("trimesh").setLevel("ERROR")
         self.num_fixed_points = num_fixed_points
         self.default_prismatic_value = default_prismatic_value
         self.with_base_link = with_base_link
+        self.attached_primitive = attached_primitive
         self._init_internal_(device, use_cache)
 
     def _init_internal_(self, device, use_cache):
@@ -272,9 +274,193 @@ class FrankaSampler:
             )
             fk_points.append(pc)
         pc = torch.cat(fk_points, dim=1)
+        
+        # Add attached primitive points if specified
+        if self.attached_primitive is not None:
+            ee_pose = self.end_effector_pose(config, frame="right_gripper")
+            primitive_points = self._sample_attached_primitive(ee_pose)
+            pc = torch.cat([pc, primitive_points], dim=1)
+        
         if num_points is None:
             return pc
         return pc[:, np.random.choice(pc.shape[1], num_points, replace=False), :]
+    
+    def _sample_attached_primitive(self, ee_poses):
+        """Sample points from the attached primitive with offset from end-effector"""
+        # Get offset configuration
+        offset = self.attached_primitive.get('offset', [0, 0, 0])
+        offset_quat = self.attached_primitive.get('offset_quaternion', [1, 0, 0, 0])  # w, x, y, z
+        
+        # Convert offset to tensor
+        offset_tensor = torch.tensor(offset, device=ee_poses.device, dtype=ee_poses.dtype)
+        offset_quat_tensor = torch.tensor(offset_quat, device=ee_poses.device, dtype=ee_poses.dtype)
+        
+        # Create offset transformation matrix
+        if ee_poses.dim() == 3:  # Batch of poses
+            batch_size = ee_poses.shape[0]
+            offset_transform = torch.eye(4, device=ee_poses.device, dtype=ee_poses.dtype)
+            offset_transform = offset_transform.unsqueeze(0).repeat(batch_size, 1, 1)
+            
+            # Apply translation offset
+            offset_transform[:, :3, 3] = offset_tensor
+            
+            # Apply rotation offset (convert quaternion to rotation matrix)
+            w, x, y, z = offset_quat_tensor
+            xx, yy, zz = x*x, y*y, z*z
+            xy, xz, yz = x*y, x*z, y*z
+            wx, wy, wz = w*x, w*y, w*z
+            
+            rotation_matrix = torch.stack([
+                1 - 2*(yy + zz),     2*(xy - wz),     2*(xz + wy),
+                2*(xy + wz),     1 - 2*(xx + zz),     2*(yz - wx),
+                2*(xz - wy),     2*(yz + wx),     1 - 2*(xx + yy)
+            ], dim=0).reshape(3, 3)
+            
+            offset_transform[:, :3, :3] = rotation_matrix.unsqueeze(0).repeat(batch_size, 1, 1)
+            
+            # Combine offset with end-effector pose
+            combined_poses = torch.matmul(ee_poses, offset_transform)
+        else:  # Single pose
+            offset_transform = torch.eye(4, device=ee_poses.device, dtype=ee_poses.dtype)
+            offset_transform[:3, 3] = offset_tensor
+            
+            # Apply rotation offset
+            w, x, y, z = offset_quat_tensor
+            xx, yy, zz = x*x, y*y, z*z
+            xy, xz, yz = x*y, x*z, y*z
+            wx, wy, wz = w*x, w*y, w*z
+            
+            rotation_matrix = torch.tensor([
+                [1 - 2*(yy + zz),     2*(xy - wz),     2*(xz + wy)],
+                [2*(xy + wz),     1 - 2*(xx + zz),     2*(yz - wx)],
+                [2*(xz - wy),     2*(yz + wx),     1 - 2*(xx + yy)]
+            ], device=ee_poses.device, dtype=ee_poses.dtype)
+            
+            offset_transform[:3, :3] = rotation_matrix
+            
+            # Combine offset with end-effector pose
+            combined_poses = torch.matmul(ee_poses, offset_transform)
+        
+        # Now generate points based on primitive type
+        if self.attached_primitive['type'] == 'cuboid':
+            # Sample points on cuboid surface
+            dims = torch.tensor(self.attached_primitive['dims'], 
+                            device=ee_poses.device, 
+                            dtype=ee_poses.dtype)
+            num_points = self.attached_primitive.get('num_points', 500)
+            
+            # Generate points on surface of cuboid (local frame)
+            points = []
+            for _ in range(num_points):
+                face = torch.randint(0, 6, (1,)).item()
+                if face == 0:  # +x face
+                    x = dims[0]/2
+                    y = torch.rand(1).item() * dims[1] - dims[1]/2
+                    z = torch.rand(1).item() * dims[2] - dims[2]/2
+                elif face == 1:  # -x face
+                    x = -dims[0]/2
+                    y = torch.rand(1).item() * dims[1] - dims[1]/2
+                    z = torch.rand(1).item() * dims[2] - dims[2]/2
+                elif face == 2:  # +y face
+                    x = torch.rand(1).item() * dims[0] - dims[0]/2
+                    y = dims[1]/2
+                    z = torch.rand(1).item() * dims[2] - dims[2]/2
+                elif face == 3:  # -y face
+                    x = torch.rand(1).item() * dims[0] - dims[0]/2
+                    y = -dims[1]/2
+                    z = torch.rand(1).item() * dims[2] - dims[2]/2
+                elif face == 4:  # +z face
+                    x = torch.rand(1).item() * dims[0] - dims[0]/2
+                    y = torch.rand(1).item() * dims[1] - dims[1]/2
+                    z = dims[2]/2
+                else:  # -z face
+                    x = torch.rand(1).item() * dims[0] - dims[0]/2
+                    y = torch.rand(1).item() * dims[1] - dims[1]/2
+                    z = -dims[2]/2
+                points.append([x.item(), y.item(), z.item()])
+            
+            points = torch.tensor(points, device=ee_poses.device, dtype=ee_poses.dtype)
+            
+            # Add batch dimension and repeat for each pose
+            if ee_poses.dim() == 3:  # Batch of poses
+                points = points.unsqueeze(0).repeat(ee_poses.shape[0], 1, 1)
+            else:  # Single pose
+                points = points.unsqueeze(0)
+            
+            # Transform points to world frame using the combined pose (EE + offset)
+            return transform_pointcloud(points, combined_poses, in_place=False)
+        
+        elif self.attached_primitive['type'] == 'cylinder':
+            # Sample points on cylinder surface
+            radius = self.attached_primitive['radius']
+            height = self.attached_primitive['height']
+            num_points = self.attached_primitive.get('num_points', 500)
+            
+            # Generate points on surface of cylinder (local frame)
+            points = []
+            for _ in range(num_points):
+                # Randomly choose between side, top, or bottom
+                surface_type = torch.randint(0, 3, (1,)).item()
+                
+                if surface_type == 0:  # Side
+                    theta = torch.rand(1).item() * 2 * torch.pi
+                    z = torch.rand(1).item() * height - height/2
+                    x = radius * torch.cos(theta)
+                    y = radius * torch.sin(theta)
+                elif surface_type == 1:  # Top
+                    theta = torch.rand(1).item() * 2 * torch.pi
+                    r = torch.sqrt(torch.rand(1).item()) * radius
+                    x = r * torch.cos(theta)
+                    y = r * torch.sin(theta)
+                    z = height/2
+                else:  # Bottom
+                    theta = torch.rand(1).item() * 2 * torch.pi
+                    r = torch.sqrt(torch.rand(1).item()) * radius
+                    x = r * torch.cos(theta)
+                    y = r * torch.sin(theta)
+                    z = -height/2
+                points.append([x.item(), y.item(), z.item()])
+            
+            points = torch.tensor(points, device=ee_poses.device, dtype=ee_poses.dtype)
+            
+            # Add batch dimension and repeat for each pose
+            if ee_poses.dim() == 3:  # Batch of poses
+                points = points.unsqueeze(0).repeat(ee_poses.shape[0], 1, 1)
+            else:  # Single pose
+                points = points.unsqueeze(0)
+            
+            # Transform points to world frame using the combined pose (EE + offset)
+            return transform_pointcloud(points, combined_poses, in_place=False)
+        
+        elif self.attached_primitive['type'] == 'sphere':
+            # Sample points on sphere surface
+            radius = self.attached_primitive['radius']
+            num_points = self.attached_primitive.get('num_points', 500)
+            
+            # Generate points on surface of sphere (local frame)
+            points = []
+            for _ in range(num_points):
+                # Uniform sampling on sphere surface
+                theta = torch.rand(1).item() * 2 * torch.pi
+                phi = torch.acos(2 * torch.rand(1).item() - 1)
+                x = radius * torch.sin(phi) * torch.cos(theta)
+                y = radius * torch.sin(phi) * torch.sin(theta)
+                z = radius * torch.cos(phi)
+                points.append([x.item(), y.item(), z.item()])
+            
+            points = torch.tensor(points, device=ee_poses.device, dtype=ee_poses.dtype)
+            
+            # Add batch dimension and repeat for each pose
+            if ee_poses.dim() == 3:  # Batch of poses
+                points = points.unsqueeze(0).repeat(ee_poses.shape[0], 1, 1)
+            else:  # Single pose
+                points = points.unsqueeze(0)
+            
+            # Transform points to world frame using the combined pose (EE + offset)
+            return transform_pointcloud(points, combined_poses, in_place=False)
+        
+        else:
+            raise ValueError(f"Unsupported primitive type: {self.attached_primitive['type']}")
     
     def sample_per_link(self, config, total_points=None):
         """

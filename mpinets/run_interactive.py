@@ -33,7 +33,7 @@ import pickle
 
 from robofin.robots import FrankaRobot, FrankaGripper
 from robofin.bullet import BulletController, Bullet
-from robofin.pointcloud.torch import FrankaSampler
+from utils import FrankaSampler
 
 # Updated model import
 from mpinets.model import MotionPolicyNetwork
@@ -42,11 +42,25 @@ from mpinets.geometry import construct_mixed_point_cloud
 from mpinets.mpinets_types import PlanningProblem, ProblemSet
 from geometrout.primitive import Cuboid, Cylinder
 
+# Import for Meshcat visualization
+import meshcat
+import meshcat.geometry as g
+import urchin
+
 NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
 MAX_ROLLOUT_LENGTH = 75
 GOAL_THRESHOLD = 0.01  # 1 cm threshold for goal reaching
+
+# attached_primitive = None
+attached_primitive = {
+    'type': 'cuboid',
+    'dims': [0.05, 0.05, 0.2],
+    'num_points': 800,
+    'offset': [0, 0, 0.1],  # 10cm in front of the end-effector
+    'offset_quaternion': [1, 0, 0, 0]  # No rotation offset (identity quaternion)
+}
 
 
 def create_point_cloud(robot_points, obstacle_points, target_points):
@@ -154,6 +168,52 @@ def convert_to_depth(problem: PlanningProblem, cam_pose: SE3) -> np.ndarray:
     return obstacle_pc
 
 
+def update_meshcat_point_cloud(viz, point_cloud):
+    """
+    Update Meshcat visualization with current point cloud including robot points
+    """
+    # Create color array: blue for robot, green for obstacles, red for target
+    point_cloud_colors = np.zeros((3, point_cloud.shape[0]))
+    
+    # Robot points (blue)
+    point_cloud_colors[2, :NUM_ROBOT_POINTS] = 1  # Blue channel
+    point_cloud_colors[0, :NUM_ROBOT_POINTS] = 0.2  # Slight red tint
+    
+    # Obstacle points (green)
+    mid_start = NUM_ROBOT_POINTS
+    mid_end = mid_start + NUM_OBSTACLE_POINTS
+    point_cloud_colors[1, mid_start:mid_end] = 1  # Green for obstacles
+    
+    # Target points (red)
+    point_cloud_colors[0, mid_end:] = 1  # Red for target
+    
+    # Convert all points to numpy (detach first to remove gradients)
+    point_cloud_positions = point_cloud[:, :3].detach().cpu().numpy().T
+    
+    viz["point_cloud"].set_object(
+        meshcat.geometry.PointCloud(
+            position=point_cloud_positions,
+            color=point_cloud_colors,
+            size=0.005,
+        )
+    )
+
+
+def setup_robot_meshcat_visualizer(viz, urdf_path):
+    """
+    Set up robot visualization in Meshcat
+    """
+    urdf = urchin.URDF.load(urdf_path)
+    # Preload the robot meshes in meshcat at a neutral position
+    for idx, (mesh, transform) in enumerate(urdf.visual_trimesh_fk(np.zeros(8)).items()):
+        viz[f"robot/{idx}"].set_object(
+            g.TriangularMeshGeometry(mesh.vertices, mesh.faces),
+            g.MeshLambertMaterial(color=0xEEDD22, wireframe=False),
+        )
+        viz[f"robot/{idx}"].set_transform(transform)
+    return urdf
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -196,12 +256,21 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # Initialize Meshcat visualizer
+    viz = meshcat.Visualizer()
+    try:
+        viz.open()
+    except Exception as e:
+        print(f"Failed to open Meshcat visualizer: {e}")
+    
+    # Set up robot visualization in Meshcat
+    urdf = setup_robot_meshcat_visualizer(viz, FrankaRobot.urdf)
+
     # Load MotionPolicyNetwork
     model = MotionPolicyNetwork.load_from_checkpoint(args.mdl_path).cuda()
     model.eval()
 
-    cpu_fk_sampler = FrankaSampler("cpu", use_cache=True)
-    gpu_fk_sampler = FrankaSampler("cuda:0", use_cache=True)
+    gpu_fk_sampler = FrankaSampler("cuda:0", use_cache=True, attached_primitive=attached_primitive)
 
     sim = BulletController(hz=12, substeps=20, gui=True)
     franka = sim.load_robot(FrankaRobot)
@@ -304,6 +373,32 @@ if __name__ == "__main__":
     target_pose = problem.target
     target_franka.marionette(target_pose)
 
+    # Initial point cloud construction and visualization
+    initial_robot_points = gpu_fk_sampler.sample(
+        torch.tensor(problem.q0, dtype=torch.float32, device="cuda:0").unsqueeze(0), 
+        NUM_ROBOT_POINTS
+    ).squeeze(0)
+    
+    target_points = gpu_fk_sampler.sample_end_effector(
+        torch.tensor(target_pose.matrix, dtype=torch.float32, device="cuda:0").unsqueeze(0),
+        NUM_TARGET_POINTS
+    ).squeeze(0)
+    
+    # Create the full point cloud for visualization
+    initial_point_cloud = torch.cat(
+        (
+            torch.zeros(NUM_ROBOT_POINTS, 4, device="cuda:0"),
+            torch.ones(NUM_OBSTACLE_POINTS, 4, device="cuda:0"),
+            2 * torch.ones(NUM_TARGET_POINTS, 4, device="cuda:0"),
+        ),
+        dim=0,
+    )
+    initial_point_cloud[:NUM_ROBOT_POINTS, :3] = initial_robot_points.float()
+    initial_point_cloud[NUM_ROBOT_POINTS:NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS, :3] = obstacle_points_tensor.float()
+    initial_point_cloud[NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS:, :3] = target_points.float()
+    
+    update_meshcat_point_cloud(viz, initial_point_cloud)
+
     print("Use WASD (XY), QE (Z) to move position.")
     print("Use U/O (roll), I/K (pitch), J/L (yaw) to rotate gripper.")
     print("Press SPACE to plan and execute. Press ESC to quit.")
@@ -319,9 +414,24 @@ if __name__ == "__main__":
         moved, target_pose = move_target_with_key(target_pose, key)
         if moved:
             target_franka.marionette(target_pose)
+            # Update target points and point cloud visualization
+            target_points = gpu_fk_sampler.sample_end_effector(
+                torch.tensor(target_pose.matrix, dtype=torch.float32, device="cuda:0").unsqueeze(0),
+                NUM_TARGET_POINTS
+            ).squeeze(0)
+            
+            # Update the point cloud with new target points
+            current_point_cloud = initial_point_cloud.clone()
+            current_point_cloud[NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS:, :3] = target_points.float()
+            update_meshcat_point_cloud(viz, current_point_cloud)
 
         sim.step()
         time.sleep(0.03)
+        
+        # Update robot mesh in Meshcat
+        sim_config, _ = franka.get_joint_states()
+        for idx, (mesh, transform) in enumerate(urdf.visual_trimesh_fk(sim_config[:8]).items()):
+            viz[f"robot/{idx}"].set_transform(transform)
 
         if key == 27:  # ESC
             print("Exiting interactive session.")
@@ -345,6 +455,7 @@ if __name__ == "__main__":
             target_pose_mat = torch.tensor(
                 target_pose.matrix, dtype=torch.float32, device="cuda:0"
             ).unsqueeze(0)
+            
             target_points = gpu_fk_sampler.sample_end_effector(
                 target_pose_mat, NUM_TARGET_POINTS
             ).squeeze(0)
@@ -373,7 +484,23 @@ if __name__ == "__main__":
                     current_q, NUM_ROBOT_POINTS
                 ).squeeze(0)
 
-                # Create point cloud
+                # Create point cloud for visualization
+                xyz_vis = torch.cat(
+                    (
+                        torch.zeros(NUM_ROBOT_POINTS, 4, device="cuda:0"),
+                        torch.ones(NUM_OBSTACLE_POINTS, 4, device="cuda:0"),
+                        2 * torch.ones(NUM_TARGET_POINTS, 4, device="cuda:0"),
+                    ),
+                    dim=0,
+                )
+                xyz_vis[:NUM_ROBOT_POINTS, :3] = robot_points.float()
+                xyz_vis[NUM_ROBOT_POINTS:NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS, :3] = obstacle_points_tensor.float()
+                xyz_vis[NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS:, :3] = target_points.float()
+                
+                # Update Meshcat visualization
+                update_meshcat_point_cloud(viz, xyz_vis)
+
+                # Create point cloud for model input
                 xyz = create_point_cloud(
                     robot_points, obstacle_points_tensor, target_points
                 )
@@ -384,6 +511,11 @@ if __name__ == "__main__":
                 current_q = unnormalize_franka_joints(q_norm)
                 current_config = current_q.squeeze(0).detach().cpu().numpy()
                 trajectory.append(current_config.copy())
+
+                # Update robot mesh in Meshcat
+                sim_config, _ = franka.get_joint_states()
+                for idx, (mesh, transform) in enumerate(urdf.visual_trimesh_fk(sim_config[:8]).items()):
+                    viz[f"robot/{idx}"].set_transform(transform)
 
                 # Check termination
                 current_ee = FrankaRobot.fk(current_config).xyz
@@ -402,6 +534,12 @@ if __name__ == "__main__":
             for q in tqdm(trajectory):
                 franka.control_position(q)
                 sim.step()
+                
+                # Update robot mesh in Meshcat
+                sim_config, _ = franka.get_joint_states()
+                for idx, (mesh, transform) in enumerate(urdf.visual_trimesh_fk(sim_config[:8]).items()):
+                    viz[f"robot/{idx}"].set_transform(transform)
+                    
                 time.sleep(0.08)
 
             # Store final configuration
