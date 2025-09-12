@@ -71,7 +71,7 @@ RUN apt update \
 #   && curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py \
 #   && python3.7 get-pip.py
 RUN rm /usr/bin/python3 && ln -s python3.7 /usr/bin/python3 \
-  && curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py \
+  && curl https://bootstrap.pypa.io/pip/3.7/get-pip.py -o get-pip.py \
   && python3.7 get-pip.py
 
 # Clone repos necessary to build OMPL and build it against the Python 3.7
