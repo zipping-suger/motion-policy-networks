@@ -345,6 +345,10 @@ class PlanningNode:
         joint_trajectory.header.frame_id = "panda_link0"
         joint_trajectory.joint_names = msg.joint_names
         
+        # Define velocity and acceleration limits
+        VEL_MAX = 0.1  # rad/s
+        ACC_MAX = 0.05  # rad/s²
+        
         # Calculate velocities and accelerations
         velocities = []
         accelerations = []
@@ -357,6 +361,8 @@ class PlanningNode:
                 velocities.append([0.0] * 7)
             else:
                 vel = [(plan[i][j] - plan[i-1][j]) / dt for j in range(7)]
+                # Apply velocity limits
+                vel = [max(min(v, VEL_MAX), -VEL_MAX) for v in vel]
                 velocities.append(vel)
         
         # Calculate accelerations using finite differences
@@ -366,6 +372,8 @@ class PlanningNode:
                 accelerations.append([0.0] * 7)
             else:
                 acc = [(velocities[i+1][j] - velocities[i][j]) / dt for j in range(7)]
+                # Apply acceleration limits
+                acc = [max(min(a, ACC_MAX), -ACC_MAX) for a in acc]
                 accelerations.append(acc)
         
         # Set final velocity and acceleration to zero
