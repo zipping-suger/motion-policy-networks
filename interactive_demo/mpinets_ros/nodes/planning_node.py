@@ -344,13 +344,43 @@ class PlanningNode:
         joint_trajectory.header.stamp = rospy.Time.now()
         joint_trajectory.header.frame_id = "panda_link0"
         joint_trajectory.joint_names = msg.joint_names
+        
+        # Calculate velocities and accelerations
+        velocities = []
+        accelerations = []
+        dt = 0.12  # time step between points
+        
+        # Calculate velocities using finite differences
+        for i in range(len(plan)):
+            if i == 0:
+                # First point has zero velocity
+                velocities.append([0.0] * 7)
+            else:
+                vel = [(plan[i][j] - plan[i-1][j]) / dt for j in range(7)]
+                velocities.append(vel)
+        
+        # Calculate accelerations using finite differences
+        for i in range(len(plan)):
+            if i == 0 or i == len(plan)-1:
+                # First and last points have zero acceleration
+                accelerations.append([0.0] * 7)
+            else:
+                acc = [(velocities[i+1][j] - velocities[i][j]) / dt for j in range(7)]
+                accelerations.append(acc)
+        
+        # Set final velocity and acceleration to zero
+        velocities[-1] = [0.0] * 7
+        accelerations[-1] = [0.0] * 7
+        
         for ii, q in enumerate(plan):
             point = JointTrajectoryPoint(
-                time_from_start=rospy.Duration.from_sec(0.12 * ii)
+                time_from_start=rospy.Duration.from_sec(dt * ii)
             )
-            for qi in q:
-                point.positions.append(qi)
+            point.positions = q
+            point.velocities = velocities[ii]
+            point.accelerations = accelerations[ii]
             joint_trajectory.points.append(point)
+            
         rospy.loginfo("Planning solution published")
         self.plan_publisher.publish(joint_trajectory)
 
