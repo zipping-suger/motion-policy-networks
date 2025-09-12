@@ -159,6 +159,8 @@ class MPiNetsInterface:
         traj_msg.joint_names = JOINT_NAMES[:7]
         point = JointTrajectoryPoint()
         point.positions = NEUTRAL_CONFIG[:7].tolist()
+        point.velocities = [0.0] * 7  # Add zero velocities
+        point.accelerations = [0.0] * 7  # Add zero accelerations
         point.time_from_start = rospy.Duration.from_sec(1.0)
         traj_msg.points.append(point)
         self.gazebo_command_publisher.publish(traj_msg)
