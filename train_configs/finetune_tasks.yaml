@@ -5,7 +5,7 @@ training_model_parameters:
     collision_loss_weight: 10
 
 data_module_parameters:
-  data_dir: /data/tabletop_tool_7k
+  data_dir: /data/cabinet_tool_5k
   trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
@@ -19,7 +19,7 @@ checkpoint_interval: 10
 validation_interval: 10
 gpus: 1 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/finetune_with_tools_table_tasks_7k
+save_checkpoint_dir: /workspace/finetune_with_tools_cabinet_tasks_5k
 max_epochs: 50
-experiment_name: finetune_with_tools_table_tasks_7k
-description: "Finetune MPINets on tabletop_tool_7k dataset with new tools and attached primitive"
+experiment_name: finetune_with_tools_cabinet_tasks_5k
+description: "Finetune MPINets on cabinet_tool_5k dataset with new tools and attached primitive"
