@@ -346,13 +346,13 @@ class PlanningNode:
         joint_trajectory.joint_names = msg.joint_names
         
         # Define velocity and acceleration limits
-        VEL_MAX = 0.1  # rad/s
-        ACC_MAX = 0.05  # rad/s²
+        VEL_MAX = 0.02  # rad/s
+        ACC_MAX = 0.01  # rad/s²
         
         # Calculate velocities and accelerations
         velocities = []
         accelerations = []
-        dt = 0.12  # time step between points
+        dt = 1  # time step between points
         
         # Calculate velocities using finite differences
         for i in range(len(plan)):
