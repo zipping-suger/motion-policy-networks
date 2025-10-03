@@ -37,7 +37,8 @@ from typing import List, Union, Optional, Dict
 import argparse
 
 import torch
-from robofin.pointcloud.torch import FrankaSampler
+# from robofin.pointcloud.torch import FrankaSampler
+from utils import FrankaSampler
 from mpinets.model import MotionPolicyNetwork
 from mpinets.geometry import construct_mixed_point_cloud
 from mpinets.utils import normalize_franka_joints, unnormalize_franka_joints
@@ -52,6 +53,16 @@ NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
 MAX_ROLLOUT_LENGTH = 150
+
+
+# attached_primitive = None
+attached_primitive = {
+    "type": "cuboid",
+    "dims": [0.05, 0.05, 0.2],
+    "num_points": 300,
+    "offset": [0, 0, 0.1],  # 10cm in front of the end-effector
+    "offset_quaternion": [1, 0, 0, 0],  # No rotation offset (identity quaternion)
+}
 
 
 def make_point_cloud_from_problem(
@@ -268,7 +279,9 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
     mdl = MotionPolicyNetwork.load_from_checkpoint(mdl_path).cuda()
     mdl.eval()
     cpu_fk_sampler = FrankaSampler("cpu", use_cache=True)
-    gpu_fk_sampler = FrankaSampler("cuda:0", use_cache=True)
+    gpu_fk_sampler = FrankaSampler(
+        "cuda:0", use_cache=True, attached_primitive=attached_primitive
+    )
     eval = Evaluator()
 
     for scene_type, scene_sets in problems.items():
@@ -324,7 +337,9 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
     mdl = MotionPolicyNetwork.load_from_checkpoint(mdl_path).cuda()
     mdl.eval()
     cpu_fk_sampler = FrankaSampler("cpu", use_cache=True)
-    gpu_fk_sampler = FrankaSampler("cuda:0", use_cache=True)
+    gpu_fk_sampler = FrankaSampler(
+        "cuda:0", use_cache=True, attached_primitive=attached_primitive
+    )
     sim = BulletController(hz=12, substeps=20, gui=True)
 
     sim.set_camera_position(yaw=-70, pitch=-30, distance=1, target=[0.0, 0.0, 0.5])
@@ -475,6 +490,12 @@ if __name__ == "__main__":
         problems = pickle.load(f)
     env_type = args.environment_type.replace("-", "_")
     problem_type = args.problem_type.replace("-", "_")
+    # print all the environment types and problem types in the pickle file
+    print("Problem types in the pickle file:")
+    for env in problems:
+        print(f"  In environment {env}:")
+        for k in problems[env].keys():
+            print(f"    {k}: {len(problems[env][k])} problems")
     if env_type != "all":
         problems = {env_type: problems[env_type]}
     if problem_type != "all":

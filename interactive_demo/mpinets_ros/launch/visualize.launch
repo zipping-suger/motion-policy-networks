@@ -1,11 +1,21 @@
 <launch>
   <arg name="mdl_path" />
-  <arg name="point_cloud_path" />
+  <arg name="point_cloud_path" default="" />
+  <arg name="pointcloud_rate" default="1.0" />
+  
   <param name="robot_description" command="$(find xacro)/xacro $(find franka_description)/robots/panda/panda.urdf.xacro hand:=true" />
+  
+  <!-- New: Point Cloud Processor Node -->
+  <node pkg="mpinets_ros" type="pointcloud_processor.py" name="pointcloud_processor" output="screen" clear_params="true">
+    <param name="output_rate" value="$(arg pointcloud_rate)" />
+  </node>
+  
+  <!-- Modified: Planning Node (now uses pre-processed point clouds) -->
   <node pkg="mpinets_ros" type="planning_node.py" name="mpinets_planning_node" output="screen" clear_params="true">
     <param name="mdl_path" value="$(arg mdl_path)" />
     <param name="point_cloud_path" value="$(arg point_cloud_path)" />
   </node>
+  
   <node name="static_link0_future_robot_states_link0_transform" pkg="tf" type="static_transform_publisher" args="0 0 0 0 0 0 panda_link0 planned_robot_states/panda_link0 100"  output="screen" />
   <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" args="joint_states:=/mpinets/joint_states" respawn="true" output="screen" />
   <node name="planned_robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" args="joint_states:=/mpinets/planned_joint_states" respawn="true" output="screen">
