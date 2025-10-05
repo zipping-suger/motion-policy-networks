@@ -1,27 +1,7 @@
-# MIT License
-#
-# Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES, University of Washington. All rights reserved.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a
-# copy of this software and associated documentation files (the "Software"),
-# to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,
-# and/or sell copies of the Software, and to permit persons to whom the
-# Software is furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-# DEALINGS IN THE SOFTWARE.
-
 import torch
 from torch import nn
+from typing import Optional, Tuple
+import numpy as np
 from robofin.pointcloud.torch import FrankaSampler, FrankaCollisionSampler
 import pytorch_lightning as pl
 from pointnet2_ops.pointnet2_modules import PointnetSAModule
@@ -32,78 +12,229 @@ from mpinets.geometry import TorchCuboids, TorchCylinders
 from typing import List, Tuple, Sequence, Dict, Callable
 
 
-class MotionPolicyNetwork(pl.LightningModule):
+from torch_geometric.nn import MLP, PointNetConv, fps, radius
+from torch_geometric.utils import to_dense_batch
+
+from mpinets.transformer import (
+    Encoder,
+    FeedForward,
+    MultiHeadAttention,
+    TransformerLayer,
+)
+
+
+class PositionEncoding3D(pl.LightningModule):
     """
-    The architecture laid out here is the default architecture laid out in the
-    Motion Policy Networks paper (Fishman, et. al, 2022).
+    Generate sinusoidal positional encoding.
+
+    f(p) = (sin(2^0 pi p), cos(2^0 pi p), ..., sin(2^L pi pi), cos(2^L pi p))
+    From M2t2:
+    https://github.com/NVlabs/M2T2/blob/734a5251e7ca36405c2b7056407db90db6c8e695/m2t2/contact_decoder.py#L51
+    The primary difference from the source is that there was
+    a bug in the positional encoding, which is fixed here.
     """
 
-    def __init__(self):
-        """
-        Constructs the model
-        """
+    def __init__(self, enc_dim, scale=np.pi, temperature=10000):
+        super(PositionEncoding3D, self).__init__()
+        self.enc_dim = enc_dim
+        self.freq = np.ceil(enc_dim / 6)
+        self.scale = scale
+        self.temperature = temperature
+        # Register pc_bounds as a buffer so it moves with the model
+        self.register_buffer(
+            "pc_bounds", torch.tensor([[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]])
+        )
+
+    def forward(self, pos, bounds=None):
+        # Use stored bounds if none provided, otherwise use the provided ones
+        if bounds is None:
+            bounds = self.pc_bounds
+        else:
+            # Ensure bounds are on the same device as pos
+            bounds = bounds.to(pos.device)
+
+        pos_min = bounds[0]
+        pos_max = bounds[1]
+        pos = ((pos - pos_min) / (pos_max - pos_min) - 0.5) * 2 * np.pi
+        dim_t = torch.arange(self.freq, dtype=torch.float32, device=pos.device)
+        dim_t = self.temperature ** (dim_t / self.freq)
+        pos = pos[..., None] * self.scale / dim_t  # (B, N, 3, F)
+        pos = torch.stack([pos.sin(), pos.cos()], dim=-1).flatten(start_dim=2)
+        pos = pos[..., : self.enc_dim]
+        return pos.detach()
+
+
+class SAModule(pl.LightningModule):
+    """
+    Set aggregation module from PointNet++ (based on implementation in pytorch geometric).
+    """
+
+    def __init__(self, ratio: float, r: float, net: nn.Module):
         super().__init__()
-        self.point_cloud_encoder = MPiNetsPointNet()
-        self.config_encoder = nn.Sequential(
-            nn.Linear(7, 32),
-            nn.LeakyReLU(),
-            nn.Linear(32, 64),
-            nn.LeakyReLU(),
-            nn.Linear(64, 128),
-            nn.LeakyReLU(),
-            nn.Linear(128, 128),
-            nn.LeakyReLU(),
-            nn.Linear(128, 64),
+        self.ratio = ratio
+        self.r = r
+        self.conv = PointNetConv(net, add_self_loops=False)
+
+    def forward(
+        self, x: torch.Tensor, pos: torch.Tensor, batch: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        idx = fps(pos, batch, ratio=self.ratio)
+        row, col = radius(
+            pos, pos[idx], self.r, batch, batch[idx], max_num_neighbors=64
         )
-        self.target_encoder = nn.Sequential(
-            nn.Linear(12, 32),  # 12 for pos + rotation matrix
-            nn.LeakyReLU(),
-            nn.Linear(32, 64),
-            nn.LeakyReLU(),
-            nn.Linear(64, 128),
-            nn.LeakyReLU(),
-            nn.Linear(128, 128),
-            nn.LeakyReLU(),
-            nn.Linear(128, 64),
+        edge_index = torch.stack([col, row], dim=0)
+        x_dst = None if x is None else x[idx]
+        x = self.conv((x, x_dst), (pos, pos[idx]), edge_index)
+        pos, batch = pos[idx], batch[idx]
+        return x, pos, batch
+
+
+class MPiFormerPointNet(pl.LightningModule):
+    def __init__(self, num_robot_points: int, input_feature_dim: int, d_model: int):
+        super().__init__()
+        # Input channels account for both `pos` and node features.
+        self.sa1_module = SAModule(
+            ratio=0.25, r=0.05, net=MLP([3 + input_feature_dim, 64, 64, 64])
         )
-        self.decoder = nn.Sequential(
-            nn.Linear(1024 + 64 + 64, 512),
-            nn.LeakyReLU(),
-            nn.Linear(512, 256),
-            nn.LeakyReLU(),
-            nn.Linear(256, 128),
-            nn.LeakyReLU(),
-            nn.Linear(128, 7),
+        self.sa2_module = SAModule(ratio=0.25, r=0.3, net=MLP([64 + 3, 128, 128, 256]))
+        self.sa3_module = SAModule(
+            ratio=0.25, r=0.5, net=MLP([256 + 3, 256, 512, d_model])
         )
+        self.point_id_embedding = nn.Parameter(
+            torch.randn((1, num_robot_points, input_feature_dim))
+        )
+        self.feature_encoder = nn.Embedding(3, input_feature_dim)
+        self.num_robot_points = num_robot_points
 
-    def configure_optimizers(self):
+    def forward(
+        self,
+        point_cloud_features: torch.Tensor,
+        point_cloud: torch.Tensor,
+    ) -> torch.Tensor:  # type: ignore[override]
         """
-        A standard method in PyTorch lightning to set the optimizer
+        Forward pass of the network
+
+        :param point_cloud torch.Tensor: Has dimensions (B, N, 4)
+                                              B is the batch size
+                                              N is the number of points
+                                              4 is x, y, z, segmentation_mask
+                                              This tensor must be on the GPU (CPU tensors not supported)
+        :rtype torch.Tensor: The output from the network
         """
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
-        return optimizer
+        B, N, _ = point_cloud.shape
+        pos = point_cloud.reshape(B * N, 3)  # Hard coded to fail if dimensions change
+        x = self.feature_encoder(point_cloud_features.squeeze(-1).long())
+        robot_features = x[:, : self.num_robot_points, :]
+        other_features = x[:, self.num_robot_points:, :]
+        robot_features = robot_features + self.point_id_embedding
+        x = torch.cat((robot_features, other_features), dim=1)
+        x = x.reshape(B * N, -1)
 
-    def forward(self, xyz: torch.Tensor, q: torch.Tensor, target: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
-        """
-        Passes data through the network to produce an output
+        batch_indices = torch.arange(B, device=point_cloud.device).unsqueeze(1)
+        batch_indices = batch_indices.repeat(1, N)
+        batch_indices = batch_indices.view(-1)
 
-        :param xyz torch.Tensor: Tensor representing the point cloud. Should
-                                      have dimensions of [B x N x 4] where B is the batch
-                                      size, N is the number of points and 4 is because there
-                                      are three geometric dimensions and a segmentation mask
-        :param q torch.Tensor: The current robot configuration normalized to be between
-                                    -1 and 1, according to each joint's range of motion
-        :rtype torch.Tensor: The displacement to be applied to the current configuration to get
-                     the position at the next step (still in normalized space)
-        """
-        pc_encoding = self.point_cloud_encoder(xyz)
-        config_encoding = self.config_encoder(q)
-        target_encoding = self.target_encoder(target)
-        x = torch.cat((pc_encoding, config_encoding, target_encoding), dim=1)
-        return self.decoder(x)
+        x, pos, batch_indices = self.sa1_module(x, pos, batch_indices)
+        x, pos, batch_indices = self.sa2_module(x, pos, batch_indices)
+        x, pos, batch_indices = self.sa3_module(x, pos, batch_indices)
+        x, x_mask = to_dense_batch(x, batch_indices)
+        assert torch.all(x_mask), "Should be true because this PC has consistent size"
+        pos, pos_mask = to_dense_batch(pos, batch_indices)
+        assert torch.all(pos_mask), "Should be true because this PC has consistent size"
+        return x, pos
 
 
-class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
+class MotionPolicyTransformer(pl.LightningModule):
+    def __init__(
+        self,
+        num_robot_points: int,
+        *,
+        feature_dim: int = 4,
+        n_heads: int = 8,
+        d_model: int = 512,
+        n_layers: int = 8,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.point_cloud_embedder = MPiFormerPointNet(
+            num_robot_points, feature_dim, d_model
+        )
+        self.feature_embedder = nn.Linear(7, d_model)
+        self.action_decoder = nn.Linear(d_model, 7)
+        encoder_layer = TransformerLayer(
+            d_model=d_model,
+            self_attn=MultiHeadAttention(
+                heads=n_heads,
+                d_model=d_model,
+                dropout_prob=dropout,
+            ),
+            src_attn=None,  # No cross attention
+            feed_forward=FeedForward(
+                d_model=d_model,
+                d_ff=4 * d_model,
+                dropout=dropout,
+                activation=nn.GELU,  # GELU gating
+                is_gated=False,  # GELU gating
+                bias1=True,  # GELU gating
+                bias2=True,  # GELU gating
+                bias_gate=True,  # GELU gating
+            ),
+            dropout_prob=dropout,
+        )
+        self.encoder = Encoder(encoder_layer, n_layers=n_layers)
+        self.action_tokens = nn.Parameter(torch.randn((1, 1, d_model)))
+        # Embedding instead of nn.parameter because it does gaussian initialization
+        self.token_type_embedding = nn.Embedding(3, d_model)
+        self.pe_layer = PositionEncoding3D(d_model)
+        # Remove this line since pc_bounds is now handled inside PositionEncoding3D
+        # self.pc_bounds = torch.as_tensor([[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]])
+
+    def forward(
+        self,
+        *,
+        point_cloud_labels: torch.Tensor,
+        point_cloud: torch.Tensor,
+        q: torch.Tensor,
+    ) -> torch.Tensor:  # type: ignore[override]
+        assert point_cloud_labels.shape[:2] == point_cloud.shape[:2]
+        pc_embedding, pos = self.point_cloud_embedder(point_cloud_labels, point_cloud)
+        feature_embedding = self.feature_embedder(q).unsqueeze(1)
+        B = point_cloud.size(0)
+        sequence = torch.cat(
+            (
+                pc_embedding,
+                feature_embedding,
+                self.action_tokens.expand((B, -1, -1)),
+            ),
+            dim=1,
+        ).transpose(0, 1)
+
+        # Indicator embeddings to label the token type
+        pc_type_emb = self.token_type_embedding(
+            torch.tensor(0, dtype=torch.long, device=self.device)
+        )
+        joint_state_type_emb = self.token_type_embedding(
+            torch.tensor(1, dtype=torch.long, device=self.device)
+        )[None, None, :]
+        action_type_emb = self.token_type_embedding(
+            torch.tensor(2, dtype=torch.long, device=self.device)
+        )[None, None, :]
+
+        pos_emb = torch.cat(
+            (
+                # Use both sin/cos emb and type label emb for pc
+                self.pe_layer(pos) + pc_type_emb,  # Remove pc_bounds argument
+                joint_state_type_emb.expand((B, -1, -1)),
+                action_type_emb.expand((B, 1, -1)),
+            ),
+            dim=1,
+        ).transpose(0, 1)
+        embedded_sequence = sequence + pos_emb
+        action = self.encoder(embedded_sequence, mask=None)[-1:]
+        return self.action_decoder(action).transpose(0, 1)
+
+
+class TrainingMotionPolicyNetwork(MotionPolicyTransformer):
     """
     An version of the MotionPolicyNetwork model that has additional attributes
     necessary during training (or using the validation step outside of the
@@ -129,13 +260,17 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         :param collision_loss_weight float: The weight assigned to the collision loss
         :rtype Self: An instance of the network
         """
-        super().__init__()
+        super().__init__(num_robot_points=num_robot_points)
         self.num_robot_points = num_robot_points
         self.point_match_loss_weight = point_match_loss_weight
         self.collision_loss_weight = collision_loss_weight
         self.fk_sampler = None
         self.collision_sampler = None
         self.loss_fun = loss.CollisionAndBCLossContainer()
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+        return optimizer
 
     def rollout(
         self,
@@ -163,10 +298,12 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
                                    first element of each batch in the list would
                                    be a single trajectory.
         """
-        xyz, q, target_pose = (
+
+        point_cloud_labels, xyz, q, target_pose = (
+            batch["point_cloud_labels"],
             batch["xyz"],
             batch["configuration"],
-            batch["target_pose"]
+            batch["target_pose"],
         )
         # This block is to adapt for the case where we only want to roll out a
         # single trajectory
@@ -181,7 +318,12 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             trajectory = [q]
 
         for i in range(rollout_length):
-            q = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
+            qdelta = self(point_cloud_labels=point_cloud_labels, point_cloud=xyz, q=q).squeeze()
+            q = torch.clamp(
+                q + qdelta,
+                min=-1,
+                max=1,
+            )
             q_unnorm = unnormalize_franka_joints(q)
             assert isinstance(q_unnorm, torch.Tensor)
             q_unnorm = q_unnorm.type_as(q)
@@ -190,7 +332,11 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             else:
                 trajectory.append(q)
 
-            samples = sampler(q_unnorm).type_as(xyz)
+            # Fix: Ensure q_unnorm has the correct dimensions for sampling
+            if q_unnorm.ndim == 3:
+                samples = sampler(q_unnorm.squeeze(1)).type_as(xyz)
+            else:
+                samples = sampler(q_unnorm).type_as(xyz)
             xyz[:, : samples.shape[1], :3] = samples
 
         return trajectory
@@ -208,13 +354,18 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         :param batch_idx int: The index of the batch (not used by this function)
         :rtype torch.Tensor: The overall weighted loss (used for backprop)
         """
-        xyz, q, target_pose = (
+        point_cloud_labels, xyz, q, target_pose = (
+            batch["point_cloud_labels"],
             batch["xyz"],
             batch["configuration"],
-            batch["target_pose"]
+            batch["target_pose"],
         )
-        y_hat = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
-        
+        y_hat = torch.clamp(
+            q + self(point_cloud_labels=point_cloud_labels, point_cloud=xyz, q=q).squeeze(),
+            min=-1,
+            max=1,
+        )
+
         (
             cuboid_centers,
             cuboid_dims,
@@ -365,75 +516,3 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             torch.stack([x["avg_collision_rate"] for x in validation_step_outputs])
         )
         self.log("avg_collision_rate", avg_collision_rate)
-
-
-class MPiNetsPointNet(pl.LightningModule):
-
-    def __init__(self):
-        super().__init__()
-        self._build_model()
-
-    def _build_model(self):
-        """
-        Assembles the model design into a ModuleList
-        """
-        self.SA_modules = nn.ModuleList()
-
-        # 1st SA: 128 points, radius .05, 64 neighbours, [1→64→64→64]
-        self.SA_modules.append(
-            PointnetSAModule(
-                npoint=128,
-                radius=0.05,
-                nsample=64,
-                mlp=[1, 64, 64, 64],
-                bn=False,
-            )
-        )
-
-        # 2nd SA: 64 points, radius .3, 64 neighbours, [64→128→128→256]
-        self.SA_modules.append(
-            PointnetSAModule(
-                npoint=64,
-                radius=0.3,
-                nsample=64,
-                mlp=[64, 128, 128, 256],
-                bn=False,
-            )
-        )
-
-        # 3rd SA (global): no npoint, 64 neighbours, [256→512→512]
-        self.SA_modules.append(
-            PointnetSAModule(
-                nsample=64,
-                mlp=[256, 512, 512],
-                bn=False,
-            )
-        )
-
-        # FC head: 512→2048→1024→1024 with GroupNorm + LeakyReLU
-        self.fc_layer = nn.Sequential(
-            nn.Linear(512, 2048),
-            nn.GroupNorm(16, 2048),
-            nn.LeakyReLU(inplace=True),
-
-            nn.Linear(2048, 1024),
-            nn.GroupNorm(16, 1024),
-            nn.LeakyReLU(inplace=True),
-
-            nn.Linear(1024, 1024),
-        )
-
-    @staticmethod
-    def _break_up_pc(pc: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        xyz = pc[..., 0:3].contiguous()
-        features = pc[..., 3:].transpose(1, 2).contiguous()
-        return xyz, features
-
-    def forward(self, point_cloud: torch.Tensor) -> torch.Tensor:
-        assert point_cloud.size(2) == 4
-        xyz, features = self._break_up_pc(point_cloud)
-        for module in self.SA_modules:
-            xyz, features = module(xyz, features)
-        # features: [B, C, 1]  → squeeze → [B, C]
-        return self.fc_layer(features.squeeze(-1))
-

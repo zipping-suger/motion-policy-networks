@@ -39,6 +39,24 @@ from mpinets.geometry import construct_mixed_point_cloud
 from mpinets import utils
 
 
+def construct_pointcloud(robot_points, obstacle_points, target_points):
+    """
+    Construct the point cloud with features as shown in the example.
+    """
+    obstacle_points = torch.as_tensor(obstacle_points[:, :3]).float()
+    
+    xyz = torch.cat((robot_points, obstacle_points, target_points), dim=0)
+    point_cloud_labels = torch.cat(
+        (
+            torch.zeros(len(robot_points), 1),
+            torch.ones(len(obstacle_points), 1),
+            2 * torch.ones(len(target_points), 1),
+        )
+    )
+
+    return xyz, point_cloud_labels
+
+
 class DatasetType(enum.Enum):
     """
     A simple enum class to indicate whether a dataloader is for training, validating, or testing
@@ -47,8 +65,8 @@ class DatasetType(enum.Enum):
     TRAIN = 0
     VAL = 1
     TEST = 2
-    
-    
+
+
 class TaskDataset(Dataset):
 
     def __init__(
@@ -81,7 +99,7 @@ class TaskDataset(Dataset):
         self.fk_sampler = FrankaSampler("cpu", use_cache=True)
         with h5py.File(str(self._database), "r") as f:
             self._length = f['target_poses'].shape[0]
-        
+
     def __len__(self):
         """
         Necessary for Pytorch. For this dataset, the length is the total number
@@ -120,28 +138,7 @@ class TaskDataset(Dataset):
         :param configuration_tensor torch.Tensor: The input tensor. Has dim [7]
         """
         return utils.normalize_franka_joints(configuration_tensor)
-    
-    def _construct_pointcloud(self, robot_points, obstacle_points, target_points):
-        """
-        Construct the point cloud with features as shown in the example.
-        """
-        obstacle_points = torch.as_tensor(obstacle_points[:, :3]).float()
-        
-        xyz = torch.cat(
-            (
-                torch.zeros(self.num_robot_points, 4),
-                torch.ones(self.num_obstacle_points, 4),
-                2 * torch.ones(self.num_target_points, 4),
-            ),
-            dim=0,
-        )
-        
-        xyz[:self.num_robot_points, :3] = robot_points.float()
-        xyz[self.num_robot_points:self.num_robot_points+self.num_obstacle_points, :3] = obstacle_points
-        xyz[self.num_robot_points+self.num_obstacle_points:, :3] = target_points.float()
-        
-        return xyz
-    
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
         Required by Pytorch. Queries for data at a particular index. Note that
@@ -151,7 +148,7 @@ class TaskDataset(Dataset):
         :rtype Dict[str, torch.Tensor]: Returns a dictionary that can be assembled
             by the data loader before using in training.
         """
-        
+
         item = {}
         with h5py.File(str(self._database), "r") as f:
             # Target
@@ -159,23 +156,23 @@ class TaskDataset(Dataset):
             target_pose = FrankaRealRobot.fk(
                 target_config
             )
-            
+
             target_pose_matrix = target_pose.matrix            
-    
+
             target_points = self.fk_sampler.sample_end_effector(
                 torch.as_tensor(target_pose_matrix).float(),
                 num_points=self.num_target_points,
             )
-            
+
             target_position = torch.as_tensor(target_pose_matrix[:3, 3], dtype=torch.float32)
-            
+
             # Use rotation matrix R9 as rotation representation
             target_rot_mat = torch.as_tensor(target_pose.matrix[:3, :3].flatten(), dtype=torch.float32)
             item["target_position"] = target_position
             item["target_rotation"] = target_rot_mat
             item["target_pose"] = torch.cat((target_position, target_rot_mat), dim=0).float()
             item["target_configuration"] = torch.as_tensor(target_config).float()
-            
+
             # Start configuration
             start_config = f['start_configs'][idx]
             config_tensor = torch.as_tensor(start_config).float()
@@ -271,7 +268,7 @@ class TaskDataset(Dataset):
             obstacle_points = construct_mixed_point_cloud(
                 cuboids + cylinders, self.num_obstacle_points
             )
-            item["xyz"] = self._construct_pointcloud(robot_points, obstacle_points, target_points)
+            item["xyz"], item["point_cloud_labels"] = construct_pointcloud(robot_points, obstacle_points, target_points)
         return item
 
 
@@ -384,7 +381,7 @@ class PointCloudBase(Dataset):
             target_points = self.fk_sampler.sample_end_effector(
                 torch.as_tensor(target_pose.matrix).float(),
                 num_points=self.num_target_points,
-            )
+            ).squeeze(0)
             
             target_position = torch.as_tensor(target_pose.xyz).float()
             # Use rotation matrix R9 as rotation representation
@@ -409,12 +406,12 @@ class PointCloudBase(Dataset):
                     torch.maximum(randomized, limits[:, 0]), limits[:, 1]
                 )
                 item["configuration"] = self.normalize(randomized)
-                robot_points = self.fk_sampler.sample(randomized, self.num_robot_points)
+                robot_points = self.fk_sampler.sample(randomized, self.num_robot_points).squeeze(0)
             else:
                 item["configuration"] = self.normalize(config_tensor)
                 robot_points = self.fk_sampler.sample(
                     config_tensor, self.num_robot_points
-                )
+                ).squeeze(0)
 
             cuboid_dims = f["cuboid_dims"][trajectory_idx, ...]
             if cuboid_dims.ndim == 1:
@@ -490,25 +487,7 @@ class PointCloudBase(Dataset):
             obstacle_points = construct_mixed_point_cloud(
                 cuboids + cylinders, self.num_obstacle_points
             )
-            item["xyz"] = torch.cat(
-                (
-                    torch.zeros(self.num_robot_points, 4),
-                    torch.ones(self.num_obstacle_points, 4),
-                    2 * torch.ones(self.num_target_points, 4),
-                ),
-                dim=0,
-            )
-            item["xyz"][: self.num_robot_points, :3] = robot_points.float()
-            item["xyz"][
-                self.num_robot_points : self.num_robot_points
-                + self.num_obstacle_points,
-                :3,
-            ] = torch.as_tensor(obstacle_points[:, :3]).float()
-            item["xyz"][
-                self.num_robot_points + self.num_obstacle_points :,
-                :3,
-            ] = target_points.float()
-
+            item["xyz"], item["point_cloud_labels"] = construct_pointcloud(robot_points, obstacle_points, target_points)
         return item
 
 
@@ -802,4 +781,3 @@ class DataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
         )
-

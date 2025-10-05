@@ -38,7 +38,7 @@ PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 sys.path.insert(0, PROJECT_ROOT)
 from mpinets.data_loader import DataModule
 from mpinets.model import TrainingMotionPolicyNetwork
-from mpinets.model_opt import TrainingPolicyNetOpt
+# from mpinets.model_opt import TrainingPolicyNetOpt
 
 
 def import_training_policy_net(mode):
