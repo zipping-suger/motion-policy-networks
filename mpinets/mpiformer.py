@@ -22,12 +22,12 @@
 
 from typing import Optional, Tuple
 
-import lightning.pytorch as pl
+import pytorch_lightning as pl
 import numpy as np
 import torch
 from torch import nn
 from torch_geometric.nn import MLP, PointNetConv, fps, radius
-from torch_geometric.typing import WITH_TORCH_CLUSTER
+# from torch_geometric.typing import WITH_TORCH_CLUSTER
 from torch_geometric.utils import to_dense_batch
 
 from mpinets.transformer import (
@@ -37,11 +37,11 @@ from mpinets.transformer import (
     TransformerLayer,
 )
 
-if not WITH_TORCH_CLUSTER:
-    quit("This code requires 'torch-cluster'")
+# if not WITH_TORCH_CLUSTER:
+#     quit("This code requires 'torch-cluster'")
 
 
-class PositionEncoding3D(nn.Module):
+class PositionEncoding3D(pl.LightningModule):
     """
     Generate sinusoidal positional encoding.
 
@@ -71,7 +71,7 @@ class PositionEncoding3D(nn.Module):
         return pos.detach()
 
 
-class SAModule(nn.Module):
+class SAModule(pl.LightningModule):
     """
     Set aggregation module from PointNet++ (based on implementation in pytorch geometric).
     """
@@ -96,7 +96,7 @@ class SAModule(nn.Module):
         return x, pos, batch
 
 
-class MPiFormerPointNet(nn.Module):
+class MPiFormerPointNet(pl.LightningModule):
     def __init__(self, num_robot_points: int, input_feature_dim: int, d_model: int):
         super().__init__()
         # Input channels account for both `pos` and node features.
@@ -151,7 +151,7 @@ class MPiFormerPointNet(nn.Module):
         return x, pos
 
 
-class MotionPolicyTransformer(nn.Module):
+class MotionPolicyTransformer(pl.LightningModule):
     """
     The MPiFormer architecture described by Fishman, et al.
 

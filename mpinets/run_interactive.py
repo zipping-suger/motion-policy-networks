@@ -1,25 +1,3 @@
-# MIT License
-#
-# Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES, University of Washington. All rights reserved.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a
-# copy of this software and associated documentation files (the "Software"),
-# to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,
-# and/or sell copies of the Software, and to permit persons to whom the
-# Software is furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-# DEALINGS IN THE SOFTWARE.
-
 import numpy as np
 import cv2
 import time
@@ -36,7 +14,7 @@ from robofin.bullet import BulletController, Bullet
 from robofin.pointcloud.torch import FrankaSampler
 
 # Updated model import
-from mpinets.model import MotionPolicyNetwork
+from mpinets.mpiformer import MotionPolicyTransformer
 from mpinets.utils import normalize_franka_joints, unnormalize_franka_joints
 from mpinets.geometry import construct_mixed_point_cloud
 from mpinets.mpinets_types import PlanningProblem, ProblemSet
@@ -47,30 +25,38 @@ NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
 MAX_ROLLOUT_LENGTH = 75
 GOAL_THRESHOLD = 0.01  # 1 cm threshold for goal reaching
+PC_BOUNDS = [[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]]
 
 
 def create_point_cloud(robot_points, obstacle_points, target_points):
+    device = robot_points.device  # Get the device from input tensors
     pc = torch.zeros(
         NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS + NUM_TARGET_POINTS,
-        4,  # x,y,z + segmentation mask
-        device="cuda:0",
+        3,  # x,y,z + segmentation mask
+        device=device,
     )
-    # Robot points (mask=0)
+    # Robot points 
     pc[:NUM_ROBOT_POINTS, :3] = robot_points
-    pc[:NUM_ROBOT_POINTS, 3] = 0
 
-    # Obstacle points (mask=1)
+    # Obstacle points 
     mid_start = NUM_ROBOT_POINTS
     mid_end = mid_start + NUM_OBSTACLE_POINTS
     pc[mid_start:mid_end, :3] = obstacle_points
-    pc[mid_start:mid_end, 3] = 1
 
-    # Target points (mask=2)
+    # Target points 
     mid_end = NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS
     pc[mid_end:, :3] = target_points
-    pc[mid_end:, 3] = 2
+    
+    # Segmentation labels: 0 for robot, 1 for obstacles, 2 for target
+    point_cloud_labels = torch.cat(
+        (
+            torch.zeros(NUM_ROBOT_POINTS, 1, device=device),
+            torch.ones(NUM_OBSTACLE_POINTS, 1, device=device),
+            2 * torch.ones(NUM_TARGET_POINTS, 1, device=device),
+        )
+    )
 
-    return pc.unsqueeze(0)  # Add batch dimension
+    return pc.unsqueeze(0), point_cloud_labels.unsqueeze(0)  # Add batch dimension
 
 
 def ensure_orthogonal_rotmat_polar(target_rotmat):
@@ -197,7 +183,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Load MotionPolicyNetwork
-    model = MotionPolicyNetwork.load_from_checkpoint(args.mdl_path).cuda()
+    model = MotionPolicyTransformer.load_from_checkpoint(
+        args.mdl_path, num_robot_points=NUM_ROBOT_POINTS
+    ).cuda()
     model.eval()
 
     cpu_fk_sampler = FrankaSampler("cpu", use_cache=True)
@@ -265,7 +253,7 @@ if __name__ == "__main__":
                 0.8276702686337273,
             ],
         ).inverse
-        
+
         # # dresser camera pose
         # cam_pose = SE3(
         #     xyz=[0.08307640315968651, 1.986952324350807, 0.9996085854670145],
@@ -281,14 +269,18 @@ if __name__ == "__main__":
 
         # Sample NUM_OBSTACLE_POINTS from the full point cloud
         if len(all_obstacle_points) > NUM_OBSTACLE_POINTS:
-            random_indices = np.random.choice(len(all_obstacle_points), size=NUM_OBSTACLE_POINTS, replace=False)
+            random_indices = np.random.choice(
+                len(all_obstacle_points), size=NUM_OBSTACLE_POINTS, replace=False
+            )
             obstacle_points = all_obstacle_points[random_indices, :]
         else:
             obstacle_points = all_obstacle_points
 
         print("Using depth camera for obstacle point cloud.")
     else:
-        obstacle_points = construct_mixed_point_cloud(problem.obstacles, NUM_OBSTACLE_POINTS)
+        obstacle_points = construct_mixed_point_cloud(
+            problem.obstacles, NUM_OBSTACLE_POINTS
+        )
         print("Using primitive-based point cloud.")
 
     obstacle_points_tensor = torch.tensor(
@@ -374,12 +366,17 @@ if __name__ == "__main__":
                 ).squeeze(0)
 
                 # Create point cloud
-                xyz = create_point_cloud(
+                xyz, point_cloud_labels = create_point_cloud(
                     robot_points, obstacle_points_tensor, target_points
                 )
 
                 # Policy prediction
-                delta_q = model(xyz, q_norm, target_pose_input)
+                delta_q = model(
+                    point_cloud_labels=point_cloud_labels,
+                    point_cloud=xyz,
+                    q=q_norm,
+                    bounds=torch.tensor(PC_BOUNDS, device=xyz.device),
+                ).squeeze()
                 q_norm = torch.clamp(q_norm + delta_q, min=-1, max=1)
                 current_q = unnormalize_franka_joints(q_norm)
                 current_config = current_q.squeeze(0).detach().cpu().numpy()
