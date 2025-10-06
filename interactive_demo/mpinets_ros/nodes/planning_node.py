@@ -211,7 +211,7 @@ class PlanningNode:
             queue_size=1,
         )
         self.full_point_cloud_publisher = rospy.Publisher(
-            "/mpinets/full_point_cloud", PointCloud2, queue_size=2
+            "/mpinets/full_point_cloud", PointCloud2, queue_size=1
         )
         self.plan_publisher = rospy.Publisher(
             "/mpinets/plan", JointTrajectory, queue_size=1
@@ -229,7 +229,6 @@ class PlanningNode:
                 PointCloud2,
                 self.processed_pointcloud_callback,
                 queue_size=1,
-                buff_size=2**20,  # Smaller buffer since data is pre-processed
             )
             self.latest_pointcloud = None
             self.latest_pointcloud_colors = None

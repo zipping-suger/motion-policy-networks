@@ -8,7 +8,7 @@
   <!-- New: Point Cloud Processor Node -->
   <node pkg="mpinets_ros" type="pointcloud_processor.py" name="pointcloud_processor" output="screen" clear_params="true">
     <param name="output_rate" value="$(arg pointcloud_rate)" />
-  </node>
+  </node> 
   
   <!-- Modified: Planning Node (now uses pre-processed point clouds) -->
   <node pkg="mpinets_ros" type="planning_node.py" name="mpinets_planning_node" output="screen" clear_params="true">

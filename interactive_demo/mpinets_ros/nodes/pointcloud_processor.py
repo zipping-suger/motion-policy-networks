@@ -13,7 +13,7 @@ class PointCloudProcessor:
         rospy.init_node("pointcloud_processor")
 
         # Parameters
-        self.output_rate = rospy.get_param("~output_rate", 1.0)  # Hz
+        self.output_rate = rospy.get_param("~output_rate", 2.0)  # Hz
         self.num_obstacle_points = 4096
 
         # Publishers/Subscribers
@@ -26,7 +26,6 @@ class PointCloudProcessor:
             PointCloud2,
             self.pointcloud_callback,
             queue_size=1,
-            buff_size=2**24,
         )
 
         # State
@@ -71,13 +70,15 @@ class PointCloudProcessor:
             self.latest_pointcloud = cleaned_points
             self.latest_colors = cleaned_colors
 
-            # Throttled publishing
-            current_time = rospy.Time.now()
-            if (current_time - self.last_publish_time).to_sec() >= (
-                1.0 / self.output_rate
-            ):
-                self.publish_processed_pointcloud()
-                self.last_publish_time = current_time
+            # # Throttled publishing
+            # current_time = rospy.Time.now()
+            # if (current_time - self.last_publish_time).to_sec() >= (
+            #     1.0 / self.output_rate
+            # ):
+            #     self.publish_processed_pointcloud()
+            #     self.last_publish_time = current_time
+
+            self.publish_processed_pointcloud()
 
         except Exception as e:
             rospy.logerr(f"Point cloud processing error: {e}")
