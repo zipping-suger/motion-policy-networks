@@ -142,7 +142,7 @@ class Planner:
 
         for _ in range(MAX_ROLLOUT_LENGTH):
             q_norm = torch.clamp(
-                q_norm + self.mdl(point_cloud, q_norm, target_pose_input), min=-1, max=1
+                q_norm + self.mdl(point_cloud, q_norm, target_pose_input), min=-0.95, max=0.95
             )
             qt = unnormalize_franka_joints(q_norm).type_as(q)
             assert isinstance(qt, torch.Tensor)
@@ -448,8 +448,13 @@ class PlanningNode:
         total_start_time = time.time()
         rospy.loginfo("=== PLANNING CALLBACK STARTED ===")
 
-        # Time the initial message processing
-        msg_processing_start = time.time()
+        # Time the trajectory message construction
+        trajectory_build_start = time.time()
+        joint_trajectory = JointTrajectory()
+        joint_trajectory.header.stamp = rospy.Time.now()
+        joint_trajectory.header.frame_id = "panda_link0"
+        joint_trajectory.joint_names = msg.joint_names
+
         q0 = np.asarray(msg.q0.position)
         target = SE3(
             xyz=[
@@ -464,7 +469,6 @@ class PlanningNode:
                 msg.target.transform.rotation.z,
             ],
         )
-        msg_processing_time = time.time() - msg_processing_start
 
         # Time the point cloud preparation
         pc_preparation_start = time.time()
@@ -498,63 +502,12 @@ class PlanningNode:
         rospy.loginfo(f"Planning succeeded: {success}")
         rospy.loginfo(f"Trajectory length: {len(plan)} points")
 
-        # Time the trajectory message construction
-        trajectory_build_start = time.time()
-        joint_trajectory = JointTrajectory()
-        joint_trajectory.header.stamp = rospy.Time.now()
-        joint_trajectory.header.frame_id = "panda_link0"
-        joint_trajectory.joint_names = msg.joint_names
-
-        # Define velocity and acceleration limits
-        VEL_MAX = 0.1  # rad/s
-        ACC_MAX = 0.05  # rad/s²
-
-        # Calculate velocities and accelerations
-        velocities = []
-        accelerations = []
-        dt = 0.12  # time step between points
-
-        # Calculate velocities using finite differences
-        vel_calc_start = time.time()
-        for i in range(len(plan)):
-            if i == 0:
-                # First point has zero velocity
-                velocities.append([0.0] * 7)
-            else:
-                vel = [(plan[i][j] - plan[i - 1][j]) / dt for j in range(7)]
-                # Apply velocity limits
-                vel = [max(min(v, VEL_MAX), -VEL_MAX) for v in vel]
-                velocities.append(vel)
-        vel_calc_time = time.time() - vel_calc_start
-
-        # Calculate accelerations using finite differences
-        acc_calc_start = time.time()
-        for i in range(len(plan)):
-            if i == 0 or i == len(plan) - 1:
-                # First and last points have zero acceleration
-                accelerations.append([0.0] * 7)
-            else:
-                acc = [(velocities[i + 1][j] - velocities[i][j]) / dt for j in range(7)]
-                # Apply acceleration limits
-                acc = [max(min(a, ACC_MAX), -ACC_MAX) for a in acc]
-                accelerations.append(acc)
-        acc_calc_time = time.time() - acc_calc_start
-
-        # Set final velocity and acceleration to zero
-        velocities[-1] = [0.0] * 7
-        accelerations[-1] = [0.0] * 7
-
-        # Build trajectory points
-        point_build_start = time.time()
+        
+        # Build trajectory points with only positions
         for ii, q in enumerate(plan):
-            point = JointTrajectoryPoint(
-                time_from_start=rospy.Duration.from_sec(dt * ii)
-            )
+            point = JointTrajectoryPoint()
             point.positions = q
-            point.velocities = velocities[ii]
-            point.accelerations = accelerations[ii]
             joint_trajectory.points.append(point)
-        point_build_time = time.time() - point_build_start
 
         trajectory_build_time = time.time() - trajectory_build_start
 
@@ -567,16 +520,6 @@ class PlanningNode:
         total_time = time.time() - total_start_time
         rospy.loginfo(f"=== PLANNING CALLBACK COMPLETE ===")
         rospy.loginfo(f"Total callback time: {total_time:.3f}s")
-        rospy.loginfo(f"Breakdown:")
-        rospy.loginfo(
-            f"  - Message processing: {msg_processing_time:.3f}s ({msg_processing_time/total_time*100:.1f}%)"
-        )
-        rospy.loginfo(
-            f"  - Point cloud prep: {pc_preparation_time:.3f}s ({pc_preparation_time/total_time*100:.1f}%)"
-        )
-        rospy.loginfo(
-            f"  - Planning: {planning_time:.3f}s ({planning_time/total_time*100:.1f}%)"
-        )
         rospy.loginfo(
             f"  - Trajectory build: {trajectory_build_time:.3f}s ({trajectory_build_time/total_time*100:.1f}%)"
         )
