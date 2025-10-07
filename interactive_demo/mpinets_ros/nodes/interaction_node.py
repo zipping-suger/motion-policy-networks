@@ -39,6 +39,7 @@ from sensor_msgs import point_cloud2
 from std_msgs.msg import Header
 import struct
 import numpy as np
+import math
 import time
 import tf2_ros
 import tf_conversions
@@ -49,6 +50,11 @@ import sys
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from sensor_msgs.msg import JointState
 
+# Robot-specific limits
+MAX_VELOCITY = 1.0 
+MAX_ACCELERATION = 0.5
+MIN_TIME_STEP = 0.1
+MAX_TIME_STEP = 1.0 
 
 # The neutral configuration at which to start the node
 NEUTRAL_CONFIG = np.array(
@@ -161,7 +167,7 @@ class MPiNetsInterface:
         point.positions = NEUTRAL_CONFIG[:7].tolist()
         point.velocities = [0.0] * 7  # Add zero velocities
         point.accelerations = [0.0] * 7  # Add zero accelerations
-        point.time_from_start = rospy.Duration.from_sec(1.0)
+        point.time_from_start = rospy.Duration.from_sec(6.0)
         traj_msg.points.append(point)
         self.gazebo_command_publisher.publish(traj_msg)
 
@@ -478,8 +484,7 @@ class MPiNetsInterface:
 
     def execute_button_callback(self, feedback):
         """
-        Execute the plan on the real robot and update current_joint_state to final position
-        Time step is based on the magnitude of the change of position
+        Execute the plan on the real robot with proper velocity/acceleration calculation
         """
         if feedback.event_type == InteractiveMarkerFeedback.BUTTON_CLICK:
             if len(self.current_plan) == 0:
@@ -493,42 +498,20 @@ class MPiNetsInterface:
             joint_trajectory.header.frame_id = "panda_link0"
             joint_trajectory.joint_names = JOINT_NAMES[:7]
 
-            # Parameters for time calculation
-            max_velocity = 0.5  # rad/s - adjust based on your robot's capabilities
-            min_time_step = 0.1  # seconds - minimum time between points
-            max_time_step = 1.0  # seconds - maximum time between points
+            # Calculate velocities and accelerations for smooth execution
+            positions = [q[:7] for q in self.current_plan]  # Extract 7DOF positions
+            times = self.calculate_trajectory_timing(positions, MAX_VELOCITY, MAX_ACCELERATION, 
+                                                MIN_TIME_STEP, MAX_TIME_STEP)
+            velocities = self.calculate_velocities(positions, times)
+            accelerations = self.calculate_accelerations(positions, velocities, times)
             
-            total_time = 0.0
-            
-            # Add first point at time 0
-            if len(self.current_plan) > 0:
-                first_point = JointTrajectoryPoint()
-                first_point.positions = self.current_plan[0][:7]
-                first_point.time_from_start = rospy.Duration.from_sec(total_time)
-                joint_trajectory.points.append(first_point)
-
-            # Calculate time steps based on position changes
-            for ii in range(1, len(self.current_plan)):
-                prev_q = self.current_plan[ii-1][:7]
-                curr_q = self.current_plan[ii][:7]
-                
-                # Calculate maximum joint position change
-                max_delta = max(abs(curr - prev) for curr, prev in zip(curr_q, prev_q))
-                
-                # Calculate required time based on velocity (time = distance/velocity)
-                if max_delta > 0:
-                    required_time = max_delta / max_velocity
-                else:
-                    required_time = min_time_step
-                    
-                # Apply bounds to the time step
-                time_step = max(min_time_step, min(required_time, max_time_step))
-                
-                total_time += time_step
-                
+            # Build trajectory points with position, velocity, and acceleration
+            for i, (pos, vel, acc, time_val) in enumerate(zip(positions, velocities, accelerations, times)):
                 point = JointTrajectoryPoint()
-                point.positions = curr_q
-                point.time_from_start = rospy.Duration.from_sec(total_time)
+                point.positions = pos
+                point.velocities = vel
+                point.accelerations = acc
+                point.time_from_start = rospy.Duration.from_sec(time_val)
                 joint_trajectory.points.append(point)
 
             self.gazebo_command_publisher.publish(joint_trajectory)
@@ -557,6 +540,76 @@ class MPiNetsInterface:
             self.current_plan = []
 
         self.server.applyChanges()
+
+    def calculate_trajectory_timing(self, positions, max_velocity, max_acceleration, min_time, max_time):
+        """
+        Calculate optimal timing between trajectory points based on velocity/acceleration limits
+        """
+        times = [0.0]  # Start at time 0
+        
+        for i in range(1, len(positions)):
+            prev_pos = positions[i-1]
+            curr_pos = positions[i]
+            
+            # Calculate maximum joint position change
+            max_delta = max(abs(curr - prev) for curr, prev in zip(curr_pos, prev_pos))
+            
+            if max_delta > 0:
+                # Calculate time based on trapezoidal velocity profile
+                # Simple version: time = distance/velocity, but respect acceleration limits
+                required_time = max_delta / max_velocity
+                
+                # Apply acceleration constraints
+                accel_time = math.sqrt(max_delta / max_acceleration)
+                required_time = max(required_time, accel_time)
+            else:
+                required_time = min_time
+                
+            # Apply time bounds
+            time_step = max(min_time, min(required_time, max_time))
+            times.append(times[-1] + time_step)
+        
+        return times
+
+    def calculate_velocities(self, positions, times):
+        """
+        Calculate velocities using finite differences
+        """
+        velocities = [[0.0] * 7]  # Start with zero velocity
+        
+        for i in range(1, len(positions)):
+            dt = times[i] - times[i-1]
+            if dt > 0:
+                vel = [(positions[i][j] - positions[i-1][j]) / dt for j in range(7)]
+                # Apply velocity limits
+                vel = [max(min(v, MAX_VELOCITY), -MAX_VELOCITY) for v in vel]
+                velocities.append(vel)
+            else:
+                velocities.append([0.0] * 7)
+        
+        # Ensure final velocity is zero
+        velocities[-1] = [0.0] * 7
+        return velocities
+
+    def calculate_accelerations(self, positions, velocities, times):
+        """
+        Calculate accelerations using finite differences
+        """
+        accelerations = [[0.0] * 7]  # Start with zero acceleration
+        
+        for i in range(1, len(velocities)):
+            dt = times[i] - times[i-1]
+            if dt > 0:
+                acc = [(velocities[i][j] - velocities[i-1][j]) / dt for j in range(7)]
+                # Apply acceleration limits
+                acc = [max(min(a, MAX_ACCELERATION), -MAX_ACCELERATION) for a in acc]
+                accelerations.append(acc)
+            else:
+                accelerations.append([0.0] * 7)
+        
+        # Ensure final acceleration is zero
+        accelerations[-1] = [0.0] * 7
+        return accelerations
 
     def target_feedback(self, feedback):
         """
