@@ -23,7 +23,7 @@ from geometrout.primitive import Cuboid, Cylinder
 NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
-MAX_ROLLOUT_LENGTH = 75
+MAX_ROLLOUT_LENGTH = 50
 GOAL_THRESHOLD = 0.01  # 1 cm threshold for goal reaching
 PC_BOUNDS = [[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]]
 
@@ -35,18 +35,18 @@ def create_point_cloud(robot_points, obstacle_points, target_points):
         3,  # x,y,z + segmentation mask
         device=device,
     )
-    # Robot points 
+    # Robot points
     pc[:NUM_ROBOT_POINTS, :3] = robot_points
 
-    # Obstacle points 
+    # Obstacle points
     mid_start = NUM_ROBOT_POINTS
     mid_end = mid_start + NUM_OBSTACLE_POINTS
     pc[mid_start:mid_end, :3] = obstacle_points
 
-    # Target points 
+    # Target points
     mid_end = NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS
     pc[mid_end:, :3] = target_points
-    
+
     # Segmentation labels: 0 for robot, 1 for obstacles, 2 for target
     point_cloud_labels = torch.cat(
         (
@@ -359,6 +359,9 @@ if __name__ == "__main__":
             trajectory = []
             trajectory.append(start_config.copy())
 
+            # --- Start Timing the Planning Loop ---
+            start_time = time.perf_counter()
+
             for i in range(MAX_ROLLOUT_LENGTH):
                 # Sample points
                 robot_points = gpu_fk_sampler.sample(
@@ -371,12 +374,15 @@ if __name__ == "__main__":
                 )
 
                 # Policy prediction
+                # Note: The model call is the main component of the "planning" time
                 delta_q = model(
                     point_cloud_labels=point_cloud_labels,
                     point_cloud=xyz,
                     q=q_norm,
                     bounds=torch.tensor(PC_BOUNDS, device=xyz.device),
                 ).squeeze()
+
+                # Apply step and update
                 q_norm = torch.clamp(q_norm + delta_q, min=-1, max=1)
                 current_q = unnormalize_franka_joints(q_norm)
                 current_config = current_q.squeeze(0).detach().cpu().numpy()
@@ -388,10 +394,17 @@ if __name__ == "__main__":
                     np.array(current_ee) - np.array(target_pose.xyz)
                 )
                 if distance < GOAL_THRESHOLD:
-                    print(f"Reached target in {i+1} steps!")
+                    print(f"Reached target in {i+1} steps! 🚀")
                     break
 
+            # --- End Timing the Planning Loop ---
+            end_time = time.perf_counter()
+            planning_time = end_time - start_time
+
             print(f"Generated trajectory with {len(trajectory)} steps")
+            print(f"Total Neural Planner Planning Time: {planning_time:.4f} seconds ⏱️")
+            # ------------------------------------
+
             franka.marionette(trajectory[0])
             time.sleep(0.2)
 

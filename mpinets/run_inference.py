@@ -1,6 +1,6 @@
 # MIT License
 #
-# Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES, University of Washington. All rights reserved.
+# Copyright (c) (c) 2022 NVIDIA CORPORATION & AFFILIATES, University of Washington. All rights reserved.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -33,13 +33,18 @@ from geometrout.transform import SE3
 
 import pickle
 from dataclasses import dataclass, field
-from typing import List, Union, Optional, Dict
+
+# FIX: Use Tuple from typing for Python versions < 3.9
+from typing import List, Union, Optional, Dict, Tuple
 import argparse
 
 import torch
+
 # from robofin.pointcloud.torch import FrankaSampler
 from utils import FrankaSampler
-from mpinets.model import MotionPolicyNetwork
+
+# UPDATED: Import MotionPolicyTransformer instead of MotionPolicyNetwork
+from mpinets.mpiformer import MotionPolicyTransformer
 from mpinets.geometry import construct_mixed_point_cloud
 from mpinets.utils import normalize_franka_joints, unnormalize_franka_joints
 from mpinets.metrics import Evaluator
@@ -53,16 +58,44 @@ NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
 MAX_ROLLOUT_LENGTH = 150
+PC_BOUNDS = torch.tensor(
+    [[-1.5, -1.5, -0.1], [1.5, 1.5, 1.5]]
+).cuda()  # Assuming model uses bounds
 
+def create_point_cloud_and_labels(robot_points, obstacle_points, target_points):
+    """
+    Creates the point cloud (xyz) and the separate point cloud labels (segmentation mask)
+    similar to run_interactive.py.
+    The output dimensions are [1 x N x 3] for xyz and [1 x N x 1] for labels.
+    """
+    device = robot_points.device
+    N_total = NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS + NUM_TARGET_POINTS
 
-# attached_primitive = None
-attached_primitive = {
-    "type": "cuboid",
-    "dims": [0.05, 0.05, 0.2],
-    "num_points": 300,
-    "offset": [0, 0, 0.1],  # 10cm in front of the end-effector
-    "offset_quaternion": [1, 0, 0, 0],  # No rotation offset (identity quaternion)
-}
+    # Stack xyz coordinates
+    pc_xyz = torch.cat(
+        (
+            robot_points.float(),
+            obstacle_points.float(),
+            target_points.float(),
+        ),
+        dim=0,
+    ).unsqueeze(
+        0
+    )  # [1 x N x 3]
+
+    # Segmentation labels: 0 for robot, 1 for obstacles, 2 for target
+    point_cloud_labels = torch.cat(
+        (
+            torch.zeros(NUM_ROBOT_POINTS, 1, device=device),
+            torch.ones(NUM_OBSTACLE_POINTS, 1, device=device),
+            2 * torch.ones(NUM_TARGET_POINTS, 1, device=device),
+        ),
+        dim=0,
+    ).unsqueeze(
+        0
+    )  # [1 x N x 1]
+
+    return pc_xyz, point_cloud_labels
 
 
 def make_point_cloud_from_problem(
@@ -70,34 +103,30 @@ def make_point_cloud_from_problem(
     target: SE3,
     obstacle_points: np.ndarray,
     fk_sampler: FrankaSampler,
-) -> torch.Tensor:
-    robot_points = fk_sampler.sample(q0, NUM_ROBOT_POINTS)
+    # FIXED: Changed from tuple[T1, T2] to Tuple[T1, T2] for Python < 3.9
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    MODIFIED: Returns a tuple of (point_cloud_xyz, point_cloud_labels)
+    """
+    robot_points = fk_sampler.sample(q0, NUM_ROBOT_POINTS).squeeze(0)  # [N_robot x 3]
 
     target_points = fk_sampler.sample_end_effector(
         torch.as_tensor(target.matrix).type_as(robot_points).unsqueeze(0),
         num_points=NUM_TARGET_POINTS,
-    )
-    xyz = torch.cat(
-        (
-            torch.zeros(NUM_ROBOT_POINTS, 4),
-            torch.ones(NUM_OBSTACLE_POINTS, 4),
-            2 * torch.ones(NUM_TARGET_POINTS, 4),
-        ),
-        dim=0,
-    )
-    xyz[:NUM_ROBOT_POINTS, :3] = robot_points.float()
+    ).squeeze(
+        0
+    )  # [N_target x 3]
+
     random_obstacle_indices = np.random.choice(
         len(obstacle_points), size=NUM_OBSTACLE_POINTS, replace=False
     )
-    xyz[
-        NUM_ROBOT_POINTS : NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS,
-        :3,
-    ] = torch.as_tensor(obstacle_points[random_obstacle_indices, :3]).float()
-    xyz[
-        NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS :,
-        :3,
-    ] = target_points.float()
-    return xyz
+    obstacle_points_sampled = torch.as_tensor(
+        obstacle_points[random_obstacle_indices, :3]
+    ).float()  # [N_obstacle x 3]
+
+    return create_point_cloud_and_labels(
+        robot_points, obstacle_points_sampled, target_points
+    )
 
 
 def make_point_cloud_from_primitives(
@@ -105,50 +134,36 @@ def make_point_cloud_from_primitives(
     target: SE3,
     obstacles: List[Union[Cuboid, Cylinder]],
     fk_sampler: FrankaSampler,
-) -> torch.Tensor:
+    # FIXED: Changed from tuple[T1, T2] to Tuple[T1, T2] for Python < 3.9
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Creates the pointcloud of the scene, including the target and the robot. When performing
-    a rollout, the robot points will be replaced based on the model's prediction
-
-    :param q0 torch.Tensor: The starting configuration (dimensions [1 x 7])
-    :param target SE3: The target pose in the `right_gripper` frame
-    :param obstacles List[Union[Cuboid, Cylinder]]: The obstacles in the scene
-    :param fk_sampler FrankaSampler: A sampler that produces points on the robot's surface
-    :rtype torch.Tensor: The pointcloud (dimensions
-                         [1 x NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS + NUM_TARGET_POINTS x 4])
+    MODIFIED: Returns a tuple of (point_cloud_xyz, point_cloud_labels)
     """
     obstacle_points = construct_mixed_point_cloud(obstacles, NUM_OBSTACLE_POINTS)
-    robot_points = fk_sampler.sample(q0, NUM_ROBOT_POINTS)
+    obstacle_points_tensor = torch.as_tensor(
+        obstacle_points[:, :3]
+    ).float()  # [N_obstacle x 3]
+
+    robot_points = fk_sampler.sample(q0, NUM_ROBOT_POINTS).squeeze(0)  # [N_robot x 3]
 
     target_points = fk_sampler.sample_end_effector(
         torch.as_tensor(target.matrix).type_as(robot_points).unsqueeze(0),
         num_points=NUM_TARGET_POINTS,
+    ).squeeze(
+        0
+    )  # [N_target x 3]
+
+    return create_point_cloud_and_labels(
+        robot_points, obstacle_points_tensor, target_points
     )
-    xyz = torch.cat(
-        (
-            torch.zeros(NUM_ROBOT_POINTS, 4),
-            torch.ones(NUM_OBSTACLE_POINTS, 4),
-            2 * torch.ones(NUM_TARGET_POINTS, 4),
-        ),
-        dim=0,
-    )
-    xyz[:NUM_ROBOT_POINTS, :3] = robot_points.float()
-    xyz[
-        NUM_ROBOT_POINTS : NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS,
-        :3,
-    ] = torch.as_tensor(obstacle_points[:, :3]).float()
-    xyz[
-        NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS :,
-        :3,
-    ] = target_points.float()
-    return xyz
 
 
 def rollout_until_success(
-    mdl: MotionPolicyNetwork,
+    mdl: MotionPolicyTransformer,  # UPDATED: Type hint
     q0: np.ndarray,
     target: SE3,
     point_cloud: torch.Tensor,
+    point_cloud_labels: torch.Tensor,  # ADDED: Point cloud labels
     fk_sampler: FrankaSampler,
 ) -> np.ndarray:
     """
@@ -156,13 +171,13 @@ def rollout_until_success(
     end effector is within 1cm and 15 degrees of the target. Gives up after 150 prediction
     steps.
 
-    :param mdl MotionPolicyNetwork: The policy
+    :param mdl MotionPolicyTransformer: The policy
     :param q0 np.ndarray: The starting configuration (dimension [7])
     :param target SE3: The target in the `right_gripper` frame
-    :param point_cloud torch.Tensor: The point cloud to be fed into the model. Should have
-                                     dimensions [1 x NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS + NUM_TARGET_POINTS x 4]
-                                     and consist of the constituent points stacked in
-                                     this order (robot, obstacle, target).
+    :param point_cloud torch.Tensor: The point cloud (xyz only) with
+                                     dimensions [1 x N x 3] (robot, obstacle, target stacked).
+    :param point_cloud_labels torch.Tensor: The segmentation mask with
+                                            dimensions [1 x N x 1] (robot=0, obstacle=1, target=2 stacked).
     :param fk_sampler FrankaSampler: A sampler that produces points on the robot's surface
     :rtype np.ndarray: The trajectory
     """
@@ -173,21 +188,63 @@ def rollout_until_success(
     trajectory = [q]
     q_norm = normalize_franka_joints(q)
     assert isinstance(q_norm, torch.Tensor)
-    
+
     # Construct the target pose input for the model
     target_position = torch.as_tensor(target.matrix[:3, 3], dtype=torch.float32)
     # Use rotation matrix R9 as rotation representation
-    target_rot_mat = torch.as_tensor(target.matrix[:3, :3].flatten(), dtype=torch.float32)
-    target_pose_input = torch.cat((target_position, target_rot_mat), dim=0).float().unsqueeze(0).to(q.device)
-    
+    target_rot_mat = torch.as_tensor(
+        target.matrix[:3, :3].flatten(), dtype=torch.float32
+    )
+    target_pose_input = (
+        torch.cat((target_position, target_rot_mat), dim=0)
+        .float()
+        .unsqueeze(0)
+        .to(q.device)
+    )
+
     success = False
 
-    def sampler(config):
-        return fk_sampler.sample(config, NUM_ROBOT_POINTS)
+    # Pre-sample target points (they don't change)
+    target_pose_mat = torch.as_tensor(
+        target.matrix, dtype=torch.float32, device=q.device
+    ).unsqueeze(0)
+    target_points = fk_sampler.sample_end_effector(
+        target_pose_mat, NUM_TARGET_POINTS
+    ).squeeze(
+        0
+    )  # [N_target x 3]
+
+    # Extract obstacle part of the initial point cloud (static)
+    N_robot = NUM_ROBOT_POINTS
+    N_obs = NUM_OBSTACLE_POINTS
+    obstacle_points_tensor = point_cloud[:, N_robot : N_robot + N_obs, :].squeeze(
+        0
+    )  # [N_obstacle x 3]
 
     for i in range(MAX_ROLLOUT_LENGTH):
-        q_norm = torch.clamp(q_norm + mdl(point_cloud, q_norm, target_pose_input), min=-1, max=1)
+        # Sample robot points for the current configuration
+        robot_points = fk_sampler.sample(q, NUM_ROBOT_POINTS).squeeze(
+            0
+        )  # [N_robot x 3]
+
+        # Create full point cloud and labels for the current step
+        xyz, pc_labels = create_point_cloud_and_labels(
+            robot_points, obstacle_points_tensor, target_points
+        )
+        xyz = xyz.type_as(point_cloud)  # Ensure correct tensor type
+
+        # UPDATED: Call model with new arguments
+        delta_q = mdl(
+            point_cloud_labels=pc_labels,
+            point_cloud=xyz,
+            q=q_norm,
+            bounds=PC_BOUNDS.type_as(xyz),
+        ).squeeze()
+
+        q_norm = torch.clamp(q_norm + delta_q, min=-1, max=1)
         qt = unnormalize_franka_joints(q_norm)
+        q = qt  # Update current configuration
+
         assert isinstance(qt, torch.Tensor)
         trajectory.append(qt)
         eff_pose = FrankaRobot.fk(
@@ -202,13 +259,13 @@ def rollout_until_success(
             < 15
         ):
             break
-        samples = sampler(qt).type_as(point_cloud)
-        point_cloud[:, : samples.shape[1], :3] = samples
 
     return np.asarray([t.squeeze().detach().cpu().numpy() for t in trajectory])
 
 
 def convert_primitive_problems_to_depth(problems: ProblemSet):
+    # This function remains largely the same as it handles PyBullet simulation for
+    # generating obstacle point clouds. No model-specific changes needed here.
     """
     Converts the planning problems in place from primitive-based to point-cloud-based.
     This used PyBullet to create the scene and sample a depth image. That depth image is
@@ -276,12 +333,14 @@ def convert_primitive_problems_to_depth(problems: ProblemSet):
 
 @torch.no_grad()
 def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
-    mdl = MotionPolicyNetwork.load_from_checkpoint(mdl_path).cuda()
+    # UPDATED: Load MotionPolicyTransformer and pass NUM_ROBOT_POINTS
+    mdl = MotionPolicyTransformer.load_from_checkpoint(
+        mdl_path, num_robot_points=NUM_ROBOT_POINTS
+    ).cuda()
     mdl.eval()
     cpu_fk_sampler = FrankaSampler("cpu", use_cache=True)
     gpu_fk_sampler = FrankaSampler(
-        "cuda:0", use_cache=True, attached_primitive=attached_primitive
-    )
+        "cuda:0", use_cache=True)
     eval = Evaluator()
 
     for scene_type, scene_sets in problems.items():
@@ -289,7 +348,7 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
             eval.create_new_group(f"{scene_type}, {problem_type}")
             for problem in tqdm(problem_set, leave=False):
                 if problem.obstacle_point_cloud is None:
-                    point_cloud = make_point_cloud_from_primitives(
+                    point_cloud, point_cloud_labels = make_point_cloud_from_primitives(
                         torch.as_tensor(problem.q0).unsqueeze(0),
                         problem.target,
                         problem.obstacles,
@@ -297,18 +356,20 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
                     )
                 else:
                     assert len(problem.obstacles) > 0
-                    point_cloud = make_point_cloud_from_problem(
+                    point_cloud, point_cloud_labels = make_point_cloud_from_problem(
                         torch.as_tensor(problem.q0).unsqueeze(0),
                         problem.target,
                         problem.obstacle_point_cloud,
                         cpu_fk_sampler,
                     )
                 start_time = time.time()
+                # Ensure point cloud and labels are on the GPU for rollout
                 trajectory = rollout_until_success(
                     mdl,
                     problem.q0,
                     problem.target,
-                    point_cloud.unsqueeze(0).cuda(),
+                    point_cloud.cuda(),
+                    point_cloud_labels.cuda(),
                     gpu_fk_sampler,
                 )
                 eval.evaluate_trajectory(
@@ -334,12 +395,14 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
     :param mdl_path str: The path to the model
     :param problems List[PlanningProblem]: A list of problems
     """
-    mdl = MotionPolicyNetwork.load_from_checkpoint(mdl_path).cuda()
+    # UPDATED: Load MotionPolicyTransformer and pass NUM_ROBOT_POINTS
+    mdl = MotionPolicyTransformer.load_from_checkpoint(
+        mdl_path, num_robot_points=NUM_ROBOT_POINTS
+    ).cuda()
     mdl.eval()
     cpu_fk_sampler = FrankaSampler("cpu", use_cache=True)
     gpu_fk_sampler = FrankaSampler(
-        "cuda:0", use_cache=True, attached_primitive=attached_primitive
-    )
+        "cuda:0", use_cache=True)
     sim = BulletController(hz=12, substeps=20, gui=True)
 
     sim.set_camera_position(yaw=-70, pitch=-30, distance=1, target=[0.0, 0.0, 0.5])
@@ -365,25 +428,27 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
             for problem in tqdm(problem_set, leave=False):
                 eval.create_new_group(f"{scene_type}, {problem_type}")
                 if problem.obstacle_point_cloud is None:
-                    point_cloud = make_point_cloud_from_primitives(
+                    point_cloud, point_cloud_labels = make_point_cloud_from_primitives(
                         torch.as_tensor(problem.q0).unsqueeze(0),
                         problem.target,
                         problem.obstacles,
                         cpu_fk_sampler,
                     )
                 else:
-                    point_cloud = make_point_cloud_from_problem(
+                    point_cloud, point_cloud_labels = make_point_cloud_from_problem(
                         torch.as_tensor(problem.q0).unsqueeze(0),
                         problem.target,
                         problem.obstacle_point_cloud,
                         cpu_fk_sampler,
                     )
                 start_time = time.time()
+                # Ensure point cloud and labels are on the GPU for rollout
                 trajectory = rollout_until_success(
                     mdl,
                     problem.q0,
                     problem.target,
-                    point_cloud.unsqueeze(0).cuda(),
+                    point_cloud.cuda(),
+                    point_cloud_labels.cuda(),
                     gpu_fk_sampler,
                 )
                 if problem.obstacles is not None:
@@ -396,19 +461,28 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
                         problem.target_negative_volumes,
                         time.time() - start_time,
                     )
+
+                # --- Meshcat Visualization Update ---
+                # point_cloud is [1 x N x 3]
+                # Filter out robot points (first NUM_ROBOT_POINTS)
+                points_to_visualize = point_cloud[0, NUM_ROBOT_POINTS:, :3].numpy().T
+
+                # Create colors for obstacle (green, index 1) and target (red, index 0)
                 point_cloud_colors = np.zeros(
                     (3, NUM_OBSTACLE_POINTS + NUM_TARGET_POINTS)
                 )
-                point_cloud_colors[1, :NUM_OBSTACLE_POINTS] = 1
-                point_cloud_colors[0, NUM_OBSTACLE_POINTS:] = 1
+                point_cloud_colors[1, :NUM_OBSTACLE_POINTS] = 1  # Obstacle = Green
+                point_cloud_colors[0, NUM_OBSTACLE_POINTS:] = 1  # Target = Red
+
                 viz["point_cloud"].set_object(
-                    # Don't visualize robot points
                     meshcat.geometry.PointCloud(
-                        position=point_cloud[NUM_ROBOT_POINTS:, :3].numpy().T,
+                        position=points_to_visualize,
                         color=point_cloud_colors,
                         size=0.005,
                     )
                 )
+                # ------------------------------------
+
                 if problem.obstacles is not None:
                     sim.load_primitives(problem.obstacles, visual_only=True)
                 gripper.marionette(problem.target)
@@ -455,7 +529,15 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "environment_type",
-        choices=["tabletop", "cubby", "merged-cubby", "dresser", "cabinet", "pillar", "all"],
+        choices=[
+            "tabletop",
+            "cubby",
+            "merged-cubby",
+            "dresser",
+            "cabinet",
+            "pillar",
+            "all",
+        ],
         help="The environment class",
     )
     parser.add_argument(
@@ -510,6 +592,8 @@ if __name__ == "__main__":
         if args.num_visualize is not None:
             for env in problems:
                 for prob_type in problems[env]:
-                    problems[env][prob_type] = problems[env][prob_type][:args.num_visualize]
+                    problems[env][prob_type] = problems[env][prob_type][
+                        : args.num_visualize
+                    ]
         time.sleep(10)
         visualize_results(args.mdl_path, problems)
