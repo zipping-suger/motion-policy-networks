@@ -55,16 +55,6 @@ NUM_TARGET_POINTS = 128
 MAX_ROLLOUT_LENGTH = 150
 
 
-# attached_primitive = None
-attached_primitive = {
-    "type": "cuboid",
-    "dims": [0.05, 0.05, 0.2],
-    "num_points": 300,
-    "offset": [0, 0, 0.1],  # 10cm in front of the end-effector
-    "offset_quaternion": [1, 0, 0, 0],  # No rotation offset (identity quaternion)
-}
-
-
 def make_point_cloud_from_problem(
     q0: torch.Tensor,
     target: SE3,
@@ -280,8 +270,7 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
     mdl.eval()
     cpu_fk_sampler = FrankaSampler("cpu", use_cache=True)
     gpu_fk_sampler = FrankaSampler(
-        "cuda:0", use_cache=True, attached_primitive=attached_primitive
-    )
+        "cuda:0", use_cache=True)
     eval = Evaluator()
 
     for scene_type, scene_sets in problems.items():
@@ -338,8 +327,7 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
     mdl.eval()
     cpu_fk_sampler = FrankaSampler("cpu", use_cache=True)
     gpu_fk_sampler = FrankaSampler(
-        "cuda:0", use_cache=True, attached_primitive=attached_primitive
-    )
+        "cuda:0", use_cache=True)
     sim = BulletController(hz=12, substeps=20, gui=True)
 
     sim.set_camera_position(yaw=-70, pitch=-30, distance=1, target=[0.0, 0.0, 0.5])

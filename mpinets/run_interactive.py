@@ -45,7 +45,7 @@ from geometrout.primitive import Cuboid, Cylinder
 NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
-MAX_ROLLOUT_LENGTH = 75
+MAX_ROLLOUT_LENGTH = 50
 GOAL_THRESHOLD = 0.01  # 1 cm threshold for goal reaching
 
 
@@ -265,7 +265,7 @@ if __name__ == "__main__":
                 0.8276702686337273,
             ],
         ).inverse
-        
+
         # # dresser camera pose
         # cam_pose = SE3(
         #     xyz=[0.08307640315968651, 1.986952324350807, 0.9996085854670145],
@@ -281,14 +281,18 @@ if __name__ == "__main__":
 
         # Sample NUM_OBSTACLE_POINTS from the full point cloud
         if len(all_obstacle_points) > NUM_OBSTACLE_POINTS:
-            random_indices = np.random.choice(len(all_obstacle_points), size=NUM_OBSTACLE_POINTS, replace=False)
+            random_indices = np.random.choice(
+                len(all_obstacle_points), size=NUM_OBSTACLE_POINTS, replace=False
+            )
             obstacle_points = all_obstacle_points[random_indices, :]
         else:
             obstacle_points = all_obstacle_points
 
         print("Using depth camera for obstacle point cloud.")
     else:
-        obstacle_points = construct_mixed_point_cloud(problem.obstacles, NUM_OBSTACLE_POINTS)
+        obstacle_points = construct_mixed_point_cloud(
+            problem.obstacles, NUM_OBSTACLE_POINTS
+        )
         print("Using primitive-based point cloud.")
 
     obstacle_points_tensor = torch.tensor(
@@ -367,6 +371,9 @@ if __name__ == "__main__":
             trajectory = []
             trajectory.append(start_config.copy())
 
+            # --- Start Timing the Planning Rollout ---
+            start_time = time.perf_counter()
+
             for i in range(MAX_ROLLOUT_LENGTH):
                 # Sample points
                 robot_points = gpu_fk_sampler.sample(
@@ -380,6 +387,11 @@ if __name__ == "__main__":
 
                 # Policy prediction
                 delta_q = model(xyz, q_norm, target_pose_input)
+
+                # The model inference is what we primarily want to time,
+                # but we'll include the necessary setup (sampling, point cloud creation)
+                # and termination checks for a full "step time."
+
                 q_norm = torch.clamp(q_norm + delta_q, min=-1, max=1)
                 current_q = unnormalize_franka_joints(q_norm)
                 current_config = current_q.squeeze(0).detach().cpu().numpy()
@@ -394,7 +406,14 @@ if __name__ == "__main__":
                     print(f"Reached target in {i+1} steps!")
                     break
 
+            # --- End Timing the Planning Rollout ---
+            end_time = time.perf_counter()
+            planning_time = end_time - start_time
+            # ----------------------------------------
+
             print(f"Generated trajectory with {len(trajectory)} steps")
+            print(f"Total Neural Planner Planning Time: {planning_time:.4f} seconds ⏱️")
+
             franka.marionette(trajectory[0])
             time.sleep(0.2)
 
