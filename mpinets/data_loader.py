@@ -47,8 +47,8 @@ class DatasetType(enum.Enum):
     TRAIN = 0
     VAL = 1
     TEST = 2
-    
-    
+
+
 class TaskDataset(Dataset):
 
     def __init__(
@@ -272,6 +272,15 @@ class TaskDataset(Dataset):
                 cuboids + cylinders, self.num_obstacle_points
             )
             item["xyz"] = self._construct_pointcloud(robot_points, obstacle_points, target_points)
+            
+            # Load additional tool-related fields if they exist in the file
+            for key in [
+                "start_tool_dims", "start_tool_offset", "start_tool_quaternion",
+                "target_tool_dims", "target_tool_offset", "target_tool_quaternion"
+            ]:
+                if key in f.keys():
+                    item[key] = torch.as_tensor(f[key][idx, ...])
+            
         return item
 
 
@@ -385,13 +394,17 @@ class PointCloudBase(Dataset):
                 torch.as_tensor(target_pose.matrix).float(),
                 num_points=self.num_target_points,
             )
-            
+
             target_position = torch.as_tensor(target_pose.xyz).float()
             # Use rotation matrix R9 as rotation representation
             target_rot_mat = torch.as_tensor(target_pose.matrix[:3, :3].flatten(), dtype=torch.float32)
             item["target_position"] = target_position
             item["target_rotation"] = target_rot_mat
             item["target_pose"] = torch.cat((target_position, target_rot_mat), dim=0).float()
+
+            # Target
+            target_config = f[self.trajectory_key][trajectory_idx, -1, :]
+            item["target_configuration"] = torch.as_tensor(target_config).float()
 
             config = f[self.trajectory_key][trajectory_idx, timestep, :]
             config_tensor = torch.as_tensor(config).float()
@@ -508,6 +521,14 @@ class PointCloudBase(Dataset):
                 self.num_robot_points + self.num_obstacle_points :,
                 :3,
             ] = target_points.float()
+            
+            # Load additional tool-related fields if they exist in the file
+            for key in [
+                "start_tool_dims", "start_tool_offset", "start_tool_quaternion",
+                "target_tool_dims", "target_tool_offset", "target_tool_quaternion"
+            ]:
+                if key in f.keys():
+                    item[key] = torch.as_tensor(f[key][trajectory_idx, ...])
 
         return item
 
@@ -802,4 +823,3 @@ class DataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
         )
-
