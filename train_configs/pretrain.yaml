@@ -5,8 +5,8 @@ training_model_parameters:
     collision_loss_weight: 5
 
 data_module_parameters:
-  data_dir: /data/cabinet_6k
-  trajectory_key: 'global_solutions' # Could also use 'global_solutions' for the global expert
+  data_dir: /data/mpinets_hybrid_training_data_tiny
+  trajectory_key: 'hybrid_solutions' # Could also use 'global_solutions' for the global expert
   num_obstacle_points: 4096
   num_target_points: 128
   random_scale: 0.015
@@ -16,8 +16,8 @@ shared_parameters:
 model_path: null
 checkpoint_interval: 10
 validation_interval: 3000
-gpus: 1 # If > 1, will use DDP for training.
+gpus: 6 # If > 1, will use DDP for training.
 batch_size: 16
-save_checkpoint_dir: /workspace/pretrain_cabinet_6k_transformer
-experiment_name: pretrain_cabinet_6k_transformer
-description: "pretrain on cabinet_6k dataset with transformer model"
+save_checkpoint_dir: /workspace/pretrain_mpinets_hybrid_training_data_tiny_transformer
+experiment_name: pretrain_mpinets_hybrid_training_data_tiny_transformer
+description: "pretrain on mpinets_hybrid_training_data_tiny with transformer"
