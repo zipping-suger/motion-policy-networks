@@ -71,7 +71,7 @@ RUN apt update \
 #   && curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py \
 #   && python3.7 get-pip.py
 RUN rm /usr/bin/python3 && ln -s python3.7 /usr/bin/python3 \
-  && curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py \
+  && curl https://bootstrap.pypa.io/pip/3.7/get-pip.py -o get-pip.py \
   && python3.7 get-pip.py
 
 # Clone repos necessary to build OMPL and build it against the Python 3.7
@@ -187,5 +187,8 @@ RUN ln -fs /usr/share/zoneinfo/America/Los_Angeles /etc/localtime \
 ENV ROS_HOSTNAME=localhost
 ENV ROS_MASTER_URI=http://localhost:11311
 
-# Section 4. Final setup items
+# Section 4. Package needed for transformer models
+RUN python3 -m pip install torch-scatter torch-sparse torch-cluster torch-spline-conv torch-geometric \
+  -f https://data.pyg.org/whl/torch-1.13.1+cu117.html
+
 ENTRYPOINT []
