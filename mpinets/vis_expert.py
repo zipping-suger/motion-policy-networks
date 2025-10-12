@@ -157,43 +157,24 @@ def run_visualization_for_problem_idx(
     data = dataset[problem_idx]
     expert_trajectory = get_expert_trajectory(dataset, problem_idx)
 
-    # --- Construct Attached Tool from Data ---
-    attached_primitive = None
-    print(f"Data keys: {list(data.keys())}")
-    # Check if tool information is in the dataset
-    if "start_tool_dims" in data:
-        tool_dims = data["start_tool_dims"].cpu().numpy()
-        # Ensure the tool has volume before creating the primitive
-        if not np.all(np.isclose(tool_dims, 0)):
-            print("Found attached tool in dataset. Constructing primitive...")
-            attached_primitive = {
-                "type": "cuboid",
-                "dims": tool_dims.tolist(),
-                "num_points": 300,
-                "offset": data["start_tool_offset"].cpu().numpy().tolist(),
-                "offset_quaternion": data["start_tool_quaternion"]
-                .cpu()
-                .numpy()
-                .tolist(),
-            }
-        else:
-            print("Tool dimensions are zero, no tool will be attached.")
-    else:
-        print("No tool information found in the dataset.")
+    # --- Get tool info from data ---
+    tool_dims = data.get("start_tool_dims", torch.zeros(3))
+    tool_offset = data.get("start_tool_offset", torch.zeros(3))
+    tool_quat = data.get("start_tool_quaternion", torch.tensor([1.0, 0.0, 0.0, 0.0]))
 
     # Setup samplers
-    # The GPU sampler is needed to include the attached primitive point cloud
     try:
-        gpu_fk_sampler = FrankaSampler(
-            "cuda:0", use_cache=True, attached_primitive=attached_primitive
-        )
+        gpu_fk_sampler = FrankaSampler("cuda:0", use_cache=True)
         device = "cuda:0"
     except:
         print("CUDA not available, falling back to CPU")
-        gpu_fk_sampler = FrankaSampler(
-            "cpu", use_cache=True, attached_primitive=attached_primitive
-        )
+        gpu_fk_sampler = FrankaSampler("cpu", use_cache=True)
         device = "cpu"
+
+    # Move tool tensors to the correct device
+    tool_dims = tool_dims.to(device)
+    tool_offset = tool_offset.to(device)
+    tool_quat = tool_quat.to(device)
 
     # Create obstacles and target pose
     obstacles = primitives_from_dataset_data(data)
@@ -212,7 +193,7 @@ def run_visualization_for_problem_idx(
         target_pose.matrix, dtype=torch.float32, device=device
     ).unsqueeze(0)
     target_points = gpu_fk_sampler.sample_end_effector(
-        target_pose_mat, NUM_TARGET_POINTS
+        target_pose_mat, tool_dims, tool_offset, tool_quat, NUM_TARGET_POINTS
     ).squeeze(0)
 
     # --- Simulation Setup ---
@@ -227,7 +208,7 @@ def run_visualization_for_problem_idx(
         start_config, dtype=torch.float32, device=device
     ).unsqueeze(0)
     initial_robot_points = gpu_fk_sampler.sample(
-        initial_q_tensor, NUM_ROBOT_POINTS
+        initial_q_tensor, tool_dims, tool_offset, tool_quat, NUM_ROBOT_POINTS
     ).squeeze(0)
     sim_config, _ = franka.get_joint_states()
     for idx, (mesh, transform) in enumerate(
@@ -255,7 +236,7 @@ def run_visualization_for_problem_idx(
             sim_config[:7], dtype=torch.float32, device=device
         ).unsqueeze(0)
         current_robot_points = gpu_fk_sampler.sample(
-            current_q_tensor, NUM_ROBOT_POINTS
+            current_q_tensor, tool_dims, tool_offset, tool_quat, NUM_ROBOT_POINTS
         ).squeeze(0)
         update_meshcat_point_cloud(
             viz, current_robot_points, obstacle_points_np, target_points

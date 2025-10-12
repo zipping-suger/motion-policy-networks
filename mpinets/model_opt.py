@@ -16,15 +16,6 @@ import torch.utils.checkpoint as checkpoint
 
 ROLLOUT_LENGTH = 69  # The trajectory length will be ROLLOUT_LENGTH + 1
 
-# attached_primitive = None
-attached_primitive = {
-    'type': 'cuboid',
-    'dims': [0.05, 0.05, 0.2],
-    'num_points': 300,
-    'offset': [0, 0, 0.1],  # 10cm in front of the end-effector
-    'offset_quaternion': [1, 0, 0, 0]  # No rotation offset (identity quaternion)
-}
-
 # Self-collision pairs for Franka Emika Panda robot
 FRANKA_SELF_COLLISION_PAIRS = [
     ('panda_link0', 'panda_link2'), ('panda_link0', 'panda_link3'),
@@ -128,7 +119,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
         return optimizer
-    
+
     def on_before_optimizer_step(self, optimizer, optimizer_idx=None):
         """
         PyTorch Lightning hook: clip gradients before optimizer step
@@ -170,7 +161,12 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
                 trajectory.append(q)
 
             with torch.no_grad():
-                samples = sampler(q_unnorm).type_as(xyz)
+                samples = sampler(
+                    q_unnorm,
+                    batch["start_tool_dims"],
+                    batch["start_tool_offset"],
+                    batch["start_tool_quaternion"],
+                ).type_as(xyz)
                 xyz[:, : samples.shape[1], :3] = samples
 
         return trajectory
@@ -222,8 +218,18 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             batch["cylinder_quats"],
         )
 
+        (
+            start_tool_dims,
+            start_tool_offset,
+            start_tool_quaternion,
+        ) = (
+            batch["start_tool_dims"],
+            batch["start_tool_offset"],
+            batch["start_tool_quaternion"],
+        )
+
         if self.fk_sampler is None:
-            self.fk_sampler = FrankaSampler(self.device, use_cache=True, attached_primitive=attached_primitive)
+            self.fk_sampler = FrankaSampler(self.device, use_cache=True)
 
         # Sum collision loss for each configuration in the rollout
         total_colli_loss = 0.0
@@ -231,7 +237,13 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
         for q in rollout:
             # Environment collision loss
-            input_pc = self.fk_sampler.sample(q, self.num_robot_points)
+            input_pc = self.fk_sampler.sample(
+                q,
+                start_tool_dims,
+                start_tool_offset,
+                start_tool_quaternion,
+                self.num_robot_points,
+            )
             colli_loss = collision_loss(
                 input_pc,
                 cuboid_centers,
@@ -243,12 +255,12 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
                 cylinder_quats,
             )
             total_colli_loss += colli_loss
-            
+
             # Self-collision loss (only if enabled)
             if self.use_self_collision:
                 # Sample point clouds per link
                 per_link_pcs = self.fk_sampler.sample_per_link(q, total_points=self.num_robot_points)
-                
+
                 for link_a_name, link_b_name in FRANKA_SELF_COLLISION_PAIRS:
                     if link_a_name in per_link_pcs and link_b_name in per_link_pcs:
                         pc_a = per_link_pcs[link_a_name]  # Shape: (B, K_a, 3)
@@ -321,7 +333,13 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         self.log("rotation_loss", rotation_loss)
         return train_loss
 
-    def sample(self, q: torch.Tensor) -> torch.Tensor:
+    def sample(
+        self,
+        q: torch.Tensor,
+        start_tool_dims: torch.Tensor,
+        start_tool_offset: torch.Tensor,
+        start_tool_quaternion: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Samples a point cloud from the surface of all the robot's links
 
@@ -329,7 +347,13 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         :rtype torch.Tensor: Batched point cloud of size [B, self.num_robot_points, 3]
         """
         assert self.fk_sampler is not None
-        return self.fk_sampler.sample(q, self.num_robot_points)
+        return self.fk_sampler.sample(
+            q,
+            start_tool_dims,
+            start_tool_offset,
+            start_tool_quaternion,
+            self.num_robot_points,
+        )
 
     def validation_step(  # type: ignore[override]
         self, batch: Dict[str, torch.Tensor], batch_idx: int
@@ -348,7 +372,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
         with torch.no_grad():
             if self.fk_sampler is None:
-                self.fk_sampler = FrankaSampler(self.device, use_cache=True, attached_primitive=attached_primitive)
+                self.fk_sampler = FrankaSampler(self.device, use_cache=True)
             if self.collision_sampler is None:
                 self.collision_sampler = FrankaCollisionSampler(
                     self.device, with_base_link=False

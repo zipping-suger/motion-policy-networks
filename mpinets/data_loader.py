@@ -10,7 +10,7 @@ import torch
 import pytorch_lightning as pl
 from pyquaternion import Quaternion
 from geometrout.primitive import Cuboid, Cylinder
-from robofin.pointcloud.torch import FrankaSampler
+from utils import FrankaSampler
 
 from robofin.robots import FrankaRealRobot
 from mpinets.geometry import construct_mixed_point_cloud
@@ -138,10 +138,21 @@ class TaskDataset(Dataset):
                 target_config
             )
             
-            target_pose_matrix = target_pose.matrix            
-    
+            target_pose_matrix = target_pose.matrix
+            
+            start_tool_dims = f['start_tool_dims'][idx] if 'start_tool_dims' in f.keys() else np.zeros(3)
+            start_tool_offset = f['start_tool_offset'][idx] if 'start_tool_offset' in f.keys() else np.zeros(3)
+            start_tool_quaternion = f['start_tool_quaternion'][idx] if 'start_tool_quaternion' in f.keys() else np.array([1.0, 0.0, 0.0, 0.0])  
+            
+            item["start_tool_dims"] = torch.as_tensor(start_tool_dims).float()
+            item["start_tool_offset"] = torch.as_tensor(start_tool_offset).float()
+            item["start_tool_quaternion"] = torch.as_tensor(start_tool_quaternion).float()
+                      
             target_points = self.fk_sampler.sample_end_effector(
                 torch.as_tensor(target_pose_matrix).float(),
+                torch.as_tensor(start_tool_dims).float(),
+                torch.as_tensor(start_tool_offset).float(),
+                torch.as_tensor(start_tool_quaternion).float(),
                 num_points=self.num_target_points,
             )
             
@@ -168,11 +179,21 @@ class TaskDataset(Dataset):
                     torch.maximum(randomized, limits[:, 0]), limits[:, 1]
                 )
                 item["configuration"] = self.normalize(randomized)
-                robot_points = self.fk_sampler.sample(randomized, self.num_robot_points)
+                robot_points = self.fk_sampler.sample(
+                    randomized,
+                    torch.as_tensor(start_tool_dims).float(),
+                    torch.as_tensor(start_tool_offset).float(),
+                    torch.as_tensor(start_tool_quaternion).float(),
+                    self.num_robot_points
+                )
             else:
                 item["configuration"] = self.normalize(config_tensor)
                 robot_points = self.fk_sampler.sample(
-                    config_tensor, self.num_robot_points
+                    config_tensor,
+                    torch.as_tensor(start_tool_dims).float(),
+                    torch.as_tensor(start_tool_offset).float(),
+                    torch.as_tensor(start_tool_quaternion).float(),
+                    self.num_robot_points
                 )
 
             cuboid_dims = f["cuboid_dims"][idx, ...]
@@ -250,15 +271,7 @@ class TaskDataset(Dataset):
                 cuboids + cylinders, self.num_obstacle_points
             )
             item["xyz"] = self._construct_pointcloud(robot_points, obstacle_points, target_points)
-            
-            # Load additional tool-related fields if they exist in the file
-            for key in [
-                "start_tool_dims", "start_tool_offset", "start_tool_quaternion",
-                "target_tool_dims", "target_tool_offset", "target_tool_quaternion"
-            ]:
-                if key in f.keys():
-                    item[key] = torch.as_tensor(f[key][idx, ...])
-            
+                        
         return item
 
 
@@ -368,8 +381,32 @@ class PointCloudBase(Dataset):
             target_pose = FrankaRealRobot.fk(
                 f[self.trajectory_key][trajectory_idx, -1, :]
             )
+
+            start_tool_dims = (
+                f["start_tool_dims"][trajectory_idx]
+                if "start_tool_dims" in f.keys()
+                else np.zeros(3)
+            )
+            start_tool_offset = (
+                f["start_tool_offset"][trajectory_idx]
+                if "start_tool_offset" in f.keys()
+                else np.zeros(3)
+            )
+            start_tool_quaternion = (
+                f["start_tool_quaternion"][trajectory_idx]
+                if "start_tool_quaternion" in f.keys()
+                else np.array([1.0, 0.0, 0.0, 0.0])
+            )
+
+            item["start_tool_dims"] = torch.as_tensor(start_tool_dims).float()
+            item["start_tool_offset"] = torch.as_tensor(start_tool_offset).float()
+            item["start_tool_quaternion"] = torch.as_tensor(start_tool_quaternion).float()
+
             target_points = self.fk_sampler.sample_end_effector(
                 torch.as_tensor(target_pose.matrix).float(),
+                torch.as_tensor(start_tool_dims).float(),
+                torch.as_tensor(start_tool_offset).float(),
+                torch.as_tensor(start_tool_quaternion).float(),
                 num_points=self.num_target_points,
             )
 
@@ -400,11 +437,20 @@ class PointCloudBase(Dataset):
                     torch.maximum(randomized, limits[:, 0]), limits[:, 1]
                 )
                 item["configuration"] = self.normalize(randomized)
-                robot_points = self.fk_sampler.sample(randomized, self.num_robot_points)
+                robot_points = self.fk_sampler.sample(
+                    randomized,
+                    torch.as_tensor(start_tool_dims).float(),
+                    torch.as_tensor(start_tool_offset).float(),
+                    torch.as_tensor(start_tool_quaternion).float(), 
+                    self.num_robot_points)
             else:
                 item["configuration"] = self.normalize(config_tensor)
                 robot_points = self.fk_sampler.sample(
-                    config_tensor, self.num_robot_points
+                    config_tensor,
+                    torch.as_tensor(start_tool_dims).float(),
+                    torch.as_tensor(start_tool_offset).float(),
+                    torch.as_tensor(start_tool_quaternion).float(), 
+                    self.num_robot_points
                 )
 
             cuboid_dims = f["cuboid_dims"][trajectory_idx, ...]
@@ -499,7 +545,7 @@ class PointCloudBase(Dataset):
                 self.num_robot_points + self.num_obstacle_points :,
                 :3,
             ] = target_points.float()
-            
+
             # Load additional tool-related fields if they exist in the file
             for key in [
                 "start_tool_dims", "start_tool_offset", "start_tool_quaternion",

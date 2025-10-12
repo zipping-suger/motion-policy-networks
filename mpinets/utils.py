@@ -1,25 +1,3 @@
-# MIT License
-#
-# Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES, University of Washington. All rights reserved.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a
-# copy of this software and associated documentation files (the "Software"),
-# to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,
-# and/or sell copies of the Software, and to permit persons to whom the
-# Software is furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-# DEALINGS IN THE SOFTWARE.
-
 from typing import Union, Tuple
 
 import numpy as np
@@ -91,13 +69,11 @@ class FrankaSampler:
         use_cache=False,
         default_prismatic_value=0.025,
         with_base_link=True,
-        attached_primitive=None
     ):
         logging.getLogger("trimesh").setLevel("ERROR")
         self.num_fixed_points = num_fixed_points
         self.default_prismatic_value = default_prismatic_value
         self.with_base_link = with_base_link
-        self.attached_primitive = attached_primitive
         self._init_internal_(device, use_cache)
 
     def _init_internal_(self, device, use_cache):
@@ -179,7 +155,15 @@ class FrankaSampler:
         fk = self.robot.link_fk_batch(cfg, use_names=True)
         return fk[frame]
 
-    def sample_end_effector(self, poses, num_points, frame="right_gripper"):
+    def sample_end_effector(
+        self,
+        poses,
+        tool_dim,
+        tool_offset,
+        tool_quat,
+        num_points,
+        frame="right_gripper",
+    ):
         """
         An internal method--separated so that the public facing method can
         choose whether or not to have gradients
@@ -225,19 +209,22 @@ class FrankaSampler:
             fk_points.append(pc)
         pc = torch.cat(fk_points, dim=1)
         pc = transform_pointcloud(pc.repeat(poses.size(0), 1, 1), poses)
-        
+
         # Add attached primitive points if specified
-        if self.attached_primitive is not None:
+        if (
+                not torch.allclose(torch.as_tensor(tool_dim), torch.zeros_like(torch.as_tensor(tool_dim)))
+                or not torch.allclose(torch.as_tensor(tool_offset), torch.zeros_like(torch.as_tensor(tool_offset)))
+        ):
             # For sample_end_effector, we already have the end-effector poses as input
             # so we can directly use them to sample the attached primitive
-            primitive_points = self._sample_attached_primitive(poses)
+            primitive_points = self._sample_attached_primitive(poses, tool_dim, tool_offset, tool_quat)
             pc = torch.cat([pc, primitive_points], dim=1)
-        
+
         if num_points is None:
             return pc
         return pc[:, np.random.choice(pc.shape[1], num_points, replace=False), :]
 
-    def sample(self, config, num_points=None):
+    def sample(self, config, tool_dim, tool_offset, tool_quat, num_points=None):
         """
         Samples points from the surface of the robot by calling fk.
 
@@ -246,6 +233,9 @@ class FrankaSampler:
         config : Tensor of length (M,) or (N, M) where M is the number of
             actuated joints.
             For example, if using the Franka, M is 9
+        tool_dim : Dimensions of the attached primitive (cuboid) [3] (optional)
+        tool_offset : Offset of the primitive from the EE [3] (optional)
+        tool_quat : Quaternion for primitive orientation [4] (optional)
         num_points : Number of points desired
 
         Returns
@@ -282,184 +272,169 @@ class FrankaSampler:
             )
             fk_points.append(pc)
         pc = torch.cat(fk_points, dim=1)
-        
+
         # Add attached primitive points if specified
-        if self.attached_primitive is not None:
+        if (
+                not torch.allclose(torch.as_tensor(tool_dim), torch.zeros_like(torch.as_tensor(tool_dim)))
+                or not torch.allclose(torch.as_tensor(tool_offset), torch.zeros_like(torch.as_tensor(tool_offset)))
+        ):
             ee_pose = self.end_effector_pose(config, frame="right_gripper")
-            primitive_points = self._sample_attached_primitive(ee_pose)
+            primitive_points = self._sample_attached_primitive(
+                ee_pose,
+                tool_dim,
+                tool_offset,
+                tool_quat
+            )
             pc = torch.cat([pc, primitive_points], dim=1)
-        
+
         if num_points is None:
             return pc
         return pc[:, np.random.choice(pc.shape[1], num_points, replace=False), :]
-    
-    def _sample_attached_primitive(self, ee_poses):
-        """Sample points from the attached primitive with proper gradient flow"""
+
+    def _sample_attached_primitive(self, ee_poses, dim, offset, offset_quat):
+        """
+        Vectorized sampling of points from attached primitive surfaces.
+        Supports batched ee_poses, dim, offset, and offset_quat.
+        """
         device = ee_poses.device
         dtype = ee_poses.dtype
-        
-        # Get offset configuration
-        offset = self.attached_primitive.get('offset', [0, 0, 0])
-        offset_quat = self.attached_primitive.get('offset_quaternion', [1, 0, 0, 0])  # w, x, y, z
-        
-        # Convert to tensors on correct device
-        offset_tensor = torch.tensor(offset, device=device, dtype=dtype)
-        offset_quat_tensor = torch.tensor(offset_quat, device=device, dtype=dtype)
-        
+
         # Handle batch dimension
-        if ee_poses.dim() == 3:  # Batch of poses: [B, 4, 4]
+        if ee_poses.dim() == 3:  # [B, 4, 4]
             batch_size = ee_poses.shape[0]
             single_pose = False
-        else:  # Single pose: [4, 4]
+        else:  # [4, 4]
             batch_size = 1
             single_pose = True
             ee_poses = ee_poses.unsqueeze(0)
-        
-        # Create offset transformation matrix
-        offset_transform = torch.eye(4, device=device, dtype=dtype)
-        offset_transform = offset_transform.unsqueeze(0).repeat(batch_size, 1, 1)
-        
-        # Apply translation offset
+
+        # Convert inputs to batched tensors
+        dim_tensor = torch.as_tensor(dim, device=device, dtype=dtype)
+        offset_tensor = torch.as_tensor(offset, device=device, dtype=dtype)
+        offset_quat_tensor = torch.as_tensor(offset_quat, device=device, dtype=dtype)
+
+        if dim_tensor.ndim == 1:
+            dim_tensor = dim_tensor.unsqueeze(0).repeat(batch_size, 1)
+        if offset_tensor.ndim == 1:
+            offset_tensor = offset_tensor.unsqueeze(0).repeat(batch_size, 1)
+        if offset_quat_tensor.ndim == 1:
+            offset_quat_tensor = offset_quat_tensor.unsqueeze(0).repeat(batch_size, 1)
+
+        # --- Build offset transform ---
+        offset_transform = (
+            torch.eye(4, device=device, dtype=dtype).unsqueeze(0).repeat(batch_size, 1, 1)
+        )
         offset_transform[:, :3, 3] = offset_tensor
-        
-        # Apply rotation offset (convert quaternion to rotation matrix - differentiable)
-        w, x, y, z = offset_quat_tensor
-        xx, yy, zz = x*x, y*y, z*z
-        xy, xz, yz = x*y, x*z, y*z
-        wx, wy, wz = w*x, w*y, w*z
-        
-        rotation_matrix = torch.stack([
-            1 - 2*(yy + zz),     2*(xy - wz),     2*(xz + wy),
-            2*(xy + wz),     1 - 2*(xx + zz),     2*(yz - wx),
-            2*(xz - wy),     2*(yz + wx),     1 - 2*(xx + yy)
-        ], dim=0).reshape(3, 3)
-        
-        offset_transform[:, :3, :3] = rotation_matrix.unsqueeze(0).repeat(batch_size, 1, 1)
-        
-        # Combine offset with end-effector pose
+
+        # Quaternion to rotation matrix (vectorized)
+        w, x, y, z = (
+            offset_quat_tensor[:, 0],
+            offset_quat_tensor[:, 1],
+            offset_quat_tensor[:, 2],
+            offset_quat_tensor[:, 3],
+        )
+        xx, yy, zz = x * x, y * y, z * z
+        xy, xz, yz = x * y, x * z, y * z
+        wx, wy, wz = w * x, w * y, w * z
+
+        rot = torch.zeros(batch_size, 3, 3, device=device, dtype=dtype)
+        rot[:, 0, 0] = 1 - 2 * (yy + zz)
+        rot[:, 0, 1] = 2 * (xy - wz)
+        rot[:, 0, 2] = 2 * (xz + wy)
+        rot[:, 1, 0] = 2 * (xy + wz)
+        rot[:, 1, 1] = 1 - 2 * (xx + zz)
+        rot[:, 1, 2] = 2 * (yz - wx)
+        rot[:, 2, 0] = 2 * (xz - wy)
+        rot[:, 2, 1] = 2 * (yz + wx)
+        rot[:, 2, 2] = 1 - 2 * (xx + yy)
+        offset_transform[:, :3, :3] = rot
+
+        # Combine offset with EE poses
         combined_poses = torch.bmm(ee_poses, offset_transform)
-        
-        # Generate points based on primitive type
-        if self.attached_primitive['type'] == 'cuboid':
-            dims = torch.tensor(self.attached_primitive['dims'], device=device, dtype=dtype)
-            num_points = self.attached_primitive.get('num_points', 500)
-            
-            # Generate random values for all points at once (differentiable)
-            rand_vals = torch.rand(num_points, 3, device=device, dtype=dtype)
-            face_choices = torch.randint(0, 6, (num_points,), device=device)
-            
-            # Initialize points tensor
-            points = torch.zeros(num_points, 3, device=device, dtype=dtype)
-            
-            # +x face
-            mask = (face_choices == 0)
-            if mask.any():
-                points[mask, 0] = dims[0] / 2
-                points[mask, 1] = rand_vals[mask, 0] * dims[1] - dims[1] / 2
-                points[mask, 2] = rand_vals[mask, 1] * dims[2] - dims[2] / 2
-            
-            # -x face
-            mask = (face_choices == 1)
-            if mask.any():
-                points[mask, 0] = -dims[0] / 2
-                points[mask, 1] = rand_vals[mask, 0] * dims[1] - dims[1] / 2
-                points[mask, 2] = rand_vals[mask, 1] * dims[2] - dims[2] / 2
-            
-            # +y face
-            mask = (face_choices == 2)
-            if mask.any():
-                points[mask, 0] = rand_vals[mask, 0] * dims[0] - dims[0] / 2
-                points[mask, 1] = dims[1] / 2
-                points[mask, 2] = rand_vals[mask, 1] * dims[2] - dims[2] / 2
-            
-            # -y face
-            mask = (face_choices == 3)
-            if mask.any():
-                points[mask, 0] = rand_vals[mask, 0] * dims[0] - dims[0] / 2
-                points[mask, 1] = -dims[1] / 2
-                points[mask, 2] = rand_vals[mask, 1] * dims[2] - dims[2] / 2
-            
-            # +z face
-            mask = (face_choices == 4)
-            if mask.any():
-                points[mask, 0] = rand_vals[mask, 0] * dims[0] - dims[0] / 2
-                points[mask, 1] = rand_vals[mask, 1] * dims[1] - dims[1] / 2
-                points[mask, 2] = dims[2] / 2
-            
-            # -z face
-            mask = (face_choices == 5)
-            if mask.any():
-                points[mask, 0] = rand_vals[mask, 0] * dims[0] - dims[0] / 2
-                points[mask, 1] = rand_vals[mask, 1] * dims[1] - dims[1] / 2
-                points[mask, 2] = -dims[2] / 2
-        
-        elif self.attached_primitive['type'] == 'cylinder':
-            radius = self.attached_primitive['radius']
-            height = self.attached_primitive['height']
-            num_points = self.attached_primitive.get('num_points', 500)
-            
-            # Generate random values
-            rand_vals = torch.rand(num_points, 3, device=device, dtype=dtype)
-            surface_choices = torch.randint(0, 3, (num_points,), device=device)
-            
-            points = torch.zeros(num_points, 3, device=device, dtype=dtype)
-            
-            # Side surface
-            mask = (surface_choices == 0)
-            if mask.any():
-                theta = rand_vals[mask, 0] * 2 * torch.pi
-                z = rand_vals[mask, 1] * height - height / 2
-                points[mask, 0] = radius * torch.cos(theta)
-                points[mask, 1] = radius * torch.sin(theta)
-                points[mask, 2] = z
-            
-            # Top surface
-            mask = (surface_choices == 1)
-            if mask.any():
-                theta = rand_vals[mask, 0] * 2 * torch.pi
-                r = torch.sqrt(rand_vals[mask, 1]) * radius  # sqrt for uniform distribution
-                points[mask, 0] = r * torch.cos(theta)
-                points[mask, 1] = r * torch.sin(theta)
-                points[mask, 2] = height / 2
-            
-            # Bottom surface
-            mask = (surface_choices == 2)
-            if mask.any():
-                theta = rand_vals[mask, 0] * 2 * torch.pi
-                r = torch.sqrt(rand_vals[mask, 1]) * radius  # sqrt for uniform distribution
-                points[mask, 0] = r * torch.cos(theta)
-                points[mask, 1] = r * torch.sin(theta)
-                points[mask, 2] = -height / 2
-        
-        elif self.attached_primitive['type'] == 'sphere':
-            radius = self.attached_primitive['radius']
-            num_points = self.attached_primitive.get('num_points', 500)
-            
-            # Uniform sampling on sphere surface
-            rand_vals = torch.rand(num_points, 2, device=device, dtype=dtype)
-            theta = rand_vals[:, 0] * 2 * torch.pi
-            phi = torch.acos(2 * rand_vals[:, 1] - 1)  # acos for uniform distribution
-            
-            points = torch.zeros(num_points, 3, device=device, dtype=dtype)
-            points[:, 0] = radius * torch.sin(phi) * torch.cos(theta)
-            points[:, 1] = radius * torch.sin(phi) * torch.sin(theta)
-            points[:, 2] = radius * torch.cos(phi)
-        
-        else:
-            raise ValueError(f"Unsupported primitive type: {self.attached_primitive['type']}")
-        
-        # Add batch dimension and repeat for each pose
-        points = points.unsqueeze(0).repeat(batch_size, 1, 1)
-        
-        # Transform points to world frame using the combined pose (EE + offset)
+
+        # --- Sample cuboid surface points ---
+        num_points = 500
+        # Shared random samples for all batches
+        rand_vals = torch.rand(num_points, 3, device=device, dtype=dtype)  # [N, 3]
+        face_choices = torch.randint(0, 6, (num_points,), device=device)  # [N]
+
+        # Expand for batch: [B, N, 3]
+        rand_vals = rand_vals.unsqueeze(0).expand(batch_size, -1, -1)
+        dims = dim_tensor.unsqueeze(1).expand(-1, num_points, -1)  # [B, N, 3]
+        points = torch.zeros_like(rand_vals)
+
+        # Masks per face (shared across batch)
+        mask_xp = face_choices == 0
+        mask_xn = face_choices == 1
+        mask_yp = face_choices == 2
+        mask_yn = face_choices == 3
+        mask_zp = face_choices == 4
+        mask_zn = face_choices == 5
+
+        # Vectorized assignment per face
+        if mask_xp.any():
+            points[:, mask_xp, 0] = dims[:, mask_xp, 0] / 2
+            points[:, mask_xp, 1] = (
+                rand_vals[:, mask_xp, 0] * dims[:, mask_xp, 1] - dims[:, mask_xp, 1] / 2
+            )
+            points[:, mask_xp, 2] = (
+                rand_vals[:, mask_xp, 1] * dims[:, mask_xp, 2] - dims[:, mask_xp, 2] / 2
+            )
+
+        if mask_xn.any():
+            points[:, mask_xn, 0] = -dims[:, mask_xn, 0] / 2
+            points[:, mask_xn, 1] = (
+                rand_vals[:, mask_xn, 0] * dims[:, mask_xn, 1] - dims[:, mask_xn, 1] / 2
+            )
+            points[:, mask_xn, 2] = (
+                rand_vals[:, mask_xn, 1] * dims[:, mask_xn, 2] - dims[:, mask_xn, 2] / 2
+            )
+
+        if mask_yp.any():
+            points[:, mask_yp, 0] = (
+                rand_vals[:, mask_yp, 0] * dims[:, mask_yp, 0] - dims[:, mask_yp, 0] / 2
+            )
+            points[:, mask_yp, 1] = dims[:, mask_yp, 1] / 2
+            points[:, mask_yp, 2] = (
+                rand_vals[:, mask_yp, 1] * dims[:, mask_yp, 2] - dims[:, mask_yp, 2] / 2
+            )
+
+        if mask_yn.any():
+            points[:, mask_yn, 0] = (
+                rand_vals[:, mask_yn, 0] * dims[:, mask_yn, 0] - dims[:, mask_yn, 0] / 2
+            )
+            points[:, mask_yn, 1] = -dims[:, mask_yn, 1] / 2
+            points[:, mask_yn, 2] = (
+                rand_vals[:, mask_yn, 1] * dims[:, mask_yn, 2] - dims[:, mask_yn, 2] / 2
+            )
+
+        if mask_zp.any():
+            points[:, mask_zp, 0] = (
+                rand_vals[:, mask_zp, 0] * dims[:, mask_zp, 0] - dims[:, mask_zp, 0] / 2
+            )
+            points[:, mask_zp, 1] = (
+                rand_vals[:, mask_zp, 1] * dims[:, mask_zp, 1] - dims[:, mask_zp, 1] / 2
+            )
+            points[:, mask_zp, 2] = dims[:, mask_zp, 2] / 2
+
+        if mask_zn.any():
+            points[:, mask_zn, 0] = (
+                rand_vals[:, mask_zn, 0] * dims[:, mask_zn, 0] - dims[:, mask_zn, 0] / 2
+            )
+            points[:, mask_zn, 1] = (
+                rand_vals[:, mask_zn, 1] * dims[:, mask_zn, 1] - dims[:, mask_zn, 1] / 2
+            )
+            points[:, mask_zn, 2] = -dims[:, mask_zn, 2] / 2
+
+        # --- Transform points to world frame ---
         transformed_points = transform_pointcloud(points, combined_poses, in_place=False)
-        
+
         # Remove batch dimension if input was single pose
         if single_pose:
             transformed_points = transformed_points.squeeze(0)
-        
+
         return transformed_points
-    
+
     def sample_per_link(self, config, total_points=None):
         """
         Samples points from each link's surface separately, distributing points proportionally
@@ -483,7 +458,7 @@ class FrankaSampler:
             squeeze_output = True
         else:
             squeeze_output = False
-            
+
         cfg = torch.cat(
             (
                 config,
@@ -495,51 +470,51 @@ class FrankaSampler:
         fk = self.robot.visual_geometry_fk_batch(cfg)
         values = list(fk.values())
         assert len(self.links) == len(values)
-        
+
         # Get relative sizes of each link (based on initialization)
         link_sizes = {l.name: self.points[l.name].shape[1] for l in self.links 
                     if not (l.name == "panda_link0" and not self.with_base_link)}
         total_fixed_points = sum(link_sizes.values())
-        
+
         per_link_pcs = {}
         for idx, l in enumerate(self.links):
             if l.name == "panda_link0" and not self.with_base_link:
                 continue
-                
+
             # Get all pre-sampled points for this link
             link_pc = self.points[l.name].float().repeat((values[idx].shape[0], 1, 1))
-            
+
             # Transform points using FK
             transformed_pc = transform_pointcloud(
                 link_pc,
                 values[idx],
                 in_place=True,
             )
-            
+
             # Subsample proportionally if total_points is specified
             if total_points is not None:
                 # Calculate how many points this link should get
                 link_points = max(1, int(round(
                     total_points * (link_sizes[l.name] / total_fixed_points)
                 )))
-                
+
                 if transformed_pc.shape[1] < link_points:
                     # If we don't have enough pre-sampled points, use all we have
                     link_points = transformed_pc.shape[1]
-                
+
                 if link_points < transformed_pc.shape[1]:
                     transformed_pc = transformed_pc[
                         :, 
                         np.random.choice(transformed_pc.shape[1], link_points, replace=False), 
                         :
                     ]
-            
+
             # Squeeze if input was 1D
             if squeeze_output:
                 transformed_pc = transformed_pc.squeeze(0)
-                
+
             per_link_pcs[l.name] = transformed_pc
-        
+
         return per_link_pcs
 
 
@@ -758,4 +733,3 @@ def unnormalize_franka_joints(
         )
     else:
         raise NotImplementedError("Only torch.Tensor and np.ndarray implemented")
-

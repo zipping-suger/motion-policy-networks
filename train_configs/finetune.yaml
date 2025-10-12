@@ -5,7 +5,7 @@ training_model_parameters:
     collision_loss_weight: 10
 
 data_module_parameters:
-  data_dir: /data/ompl_table_6k
+  data_dir: /data/tabletop_tools_6k
   trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
@@ -18,8 +18,8 @@ model_path: /workspace/mpinets_finetune_mpinets_hybrid_training_data_small_hybri
 checkpoint_interval: 10
 validation_interval: 10
 gpus: 1 # If > 1, will use DDP for training.
-batch_size: 48
-save_checkpoint_dir: /workspace/finetune_with_new_tools_table_6k
+batch_size: 16
+save_checkpoint_dir: /workspace/finetune_with_diverse_tools_tabletop_tools_6k
 max_epochs: 50
-experiment_name: finetune_with_new_tools_table_6k
-description: "Finetune MPINets on table_6k dataset with new tools and attached primitive"
+experiment_name: finetune_with_diverse_tools_tabletop_tools_6k
+description: "Finetune MPINets on tabletop_tools_6k dataset with diverse tools"

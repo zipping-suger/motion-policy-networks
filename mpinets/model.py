@@ -147,6 +147,7 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             batch["configuration"],
             batch["target_pose"]
         )
+        
         # This block is to adapt for the case where we only want to roll out a
         # single trajectory
         if q.ndim == 1:
@@ -169,7 +170,12 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             else:
                 trajectory.append(q)
 
-            samples = sampler(q_unnorm).type_as(xyz)
+            samples = sampler(
+                q_unnorm,
+                batch["start_tool_dims"],
+                batch["start_tool_offset"],
+                batch["start_tool_quaternion"],
+            ).type_as(xyz)
             xyz[:, : samples.shape[1], :3] = samples
 
         return trajectory
@@ -193,7 +199,7 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             batch["target_pose"]
         )
         y_hat = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
-        
+
         (
             cuboid_centers,
             cuboid_dims,
@@ -213,6 +219,17 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             batch["cylinder_quats"],
             batch["supervision"],
         )
+
+        (
+            start_tool_dims,
+            start_tool_offset,
+            start_tool_quaternion,
+        ) = (
+            batch["start_tool_dims"],
+            batch["start_tool_offset"],
+            batch["start_tool_quaternion"],
+        )
+
         collision_loss, point_match_loss = self.loss_fun(
             y_hat,
             cuboid_centers,
@@ -222,8 +239,12 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             cylinder_radii,
             cylinder_heights,
             cylinder_quats,
+            start_tool_dims,
+            start_tool_offset,
+            start_tool_quaternion,
             supervision,
         )
+
         self.log("point_match_loss", point_match_loss)
         self.log("collision_loss", collision_loss)
         train_loss = (
@@ -233,7 +254,13 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         self.log("train_loss", train_loss)
         return train_loss
 
-    def sample(self, q: torch.Tensor) -> torch.Tensor:
+    def sample(
+        self,
+        q: torch.Tensor,
+        start_tool_dims: torch.Tensor,
+        start_tool_offset: torch.Tensor,
+        start_tool_quaternion: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Samples a point cloud from the surface of all the robot's links
 
@@ -241,7 +268,12 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         :rtype torch.Tensor: Batched point cloud of size [B, self.num_robot_points, 3]
         """
         assert self.fk_sampler is not None
-        return self.fk_sampler.sample(q, self.num_robot_points)
+        return self.fk_sampler.sample(
+            q,
+            start_tool_dims,
+            start_tool_offset,
+            start_tool_quaternion,
+            self.num_robot_points)
 
     def validation_step(  # type: ignore[override]
         self, batch: Dict[str, torch.Tensor], batch_idx: int
@@ -415,4 +447,3 @@ class MPiNetsPointNet(pl.LightningModule):
             xyz, features = module(xyz, features)
         # features: [B, C, 1]  → squeeze → [B, C]
         return self.fc_layer(features.squeeze(-1))
-

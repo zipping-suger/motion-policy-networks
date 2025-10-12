@@ -25,7 +25,7 @@ from mpinets import utils
 from mpinets.geometry import TorchCuboids, TorchCylinders
 import torch.nn.functional as F
 import torch
-from robofin.pointcloud.torch import FrankaSampler
+from utils import FrankaSampler
 
 
 def point_match_loss(input_pc: torch.Tensor, target_pc: torch.Tensor) -> torch.Tensor:
@@ -118,6 +118,9 @@ class CollisionAndBCLossContainer:
         cylinder_radii: torch.Tensor,
         cylinder_heights: torch.Tensor,
         cylinder_quaternions: torch.Tensor,
+        start_tool_dims: torch.Tensor,
+        start_tool_offset: torch.Tensor,
+        start_tool_quaternion: torch.Tensor,
         target_normalized: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -147,9 +150,15 @@ class CollisionAndBCLossContainer:
             )
         input_pc = self.fk_sampler.sample(
             utils.unnormalize_franka_joints(input_normalized),
+            start_tool_dims,
+            start_tool_offset,
+            start_tool_quaternion,
         )
         target_pc = self.fk_sampler.sample(
             utils.unnormalize_franka_joints(target_normalized),
+            start_tool_dims,
+            start_tool_offset,
+            start_tool_quaternion,
         )
         return (
             collision_loss(
