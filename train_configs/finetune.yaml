@@ -14,12 +14,12 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: /workspace/mpinets_finetune_mpinets_hybrid_training_data_small_hybrid_finetuned_on_small/sp2hrle1/epoch=14-step=17040.ckpt
+model_path: /workspace/pretrain_tabletop_tools_50k/d5de81f1/epoch=2-step=336501.ckpt
 checkpoint_interval: 10
 validation_interval: 10
 gpus: 1 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/finetune_with_diverse_tools_tabletop_tools_50k
+save_checkpoint_dir: /workspace/pretrain_finetune_with_diverse_tools_tabletop_tools_50k
 max_epochs: 50
-experiment_name: finetune_with_diverse_tools_tabletop_tools_50k
-description: "Finetune MPINets on tabletop_tools_50k dataset with diverse tools"
+experiment_name: pretrain_finetune_with_diverse_tools_tabletop_tools_50k
+description: "Pretrain and finetune on tabletop_tools_50k dataset with diverse tools"
