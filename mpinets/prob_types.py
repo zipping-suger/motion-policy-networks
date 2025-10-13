@@ -9,6 +9,18 @@ Trajectory = Sequence[Union[Sequence, np.ndarray]]
 
 
 @dataclass
+class Tool:
+    """
+    Represents a tool in the environment
+    """
+
+    primitive_type: str
+    dims: List[float]
+    offset: List[float]
+    offset_quaternion: List[float]
+
+
+@dataclass
 class PlanningProblem:
     """
     Defines a common interface to describe planning problems
@@ -20,6 +32,7 @@ class PlanningProblem:
     obstacles: Optional[Obstacles] = None  # The obstacles in the scene
     obstacle_point_cloud: Optional[np.ndarray] = None
     target_negative_volumes: Obstacles = field(default_factory=lambda: [])
+    tool: Optional[Tool] = None
 
 
 ProblemSet = Dict[str, Dict[str, List[PlanningProblem]]]

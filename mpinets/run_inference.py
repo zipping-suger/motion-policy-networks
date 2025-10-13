@@ -13,9 +13,10 @@ import pickle
 from dataclasses import dataclass, field
 from typing import List, Union, Optional, Dict
 import argparse
+import sys
 
 import torch
-from robofin.pointcloud.torch import FrankaSampler
+from utils import FrankaSampler
 from mpinets.model import MotionPolicyNetwork
 from mpinets.geometry import construct_mixed_point_cloud
 from mpinets.utils import normalize_franka_joints, unnormalize_franka_joints
@@ -37,11 +38,19 @@ def make_point_cloud_from_problem(
     target: SE3,
     obstacle_points: np.ndarray,
     fk_sampler: FrankaSampler,
+    tool_dim: List[float],
+    tool_offset: List[float],
+    tool_quat: List[float],
 ) -> torch.Tensor:
-    robot_points = fk_sampler.sample(q0, NUM_ROBOT_POINTS)
+    robot_points = fk_sampler.sample(
+        q0, tool_dim, tool_offset, tool_quat, NUM_ROBOT_POINTS
+    )
 
     target_points = fk_sampler.sample_end_effector(
         torch.as_tensor(target.matrix).type_as(robot_points).unsqueeze(0),
+        tool_dim,
+        tool_offset,
+        tool_quat,
         num_points=NUM_TARGET_POINTS,
     )
     xyz = torch.cat(
@@ -72,6 +81,9 @@ def make_point_cloud_from_primitives(
     target: SE3,
     obstacles: List[Union[Cuboid, Cylinder]],
     fk_sampler: FrankaSampler,
+    tool_dim: List[float],
+    tool_offset: List[float],
+    tool_quat: List[float],
 ) -> torch.Tensor:
     """
     Creates the pointcloud of the scene, including the target and the robot. When performing
@@ -85,10 +97,15 @@ def make_point_cloud_from_primitives(
                          [1 x NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS + NUM_TARGET_POINTS x 4])
     """
     obstacle_points = construct_mixed_point_cloud(obstacles, NUM_OBSTACLE_POINTS)
-    robot_points = fk_sampler.sample(q0, NUM_ROBOT_POINTS)
+    robot_points = fk_sampler.sample(
+        q0, tool_dim, tool_offset, tool_quat, NUM_ROBOT_POINTS
+    )
 
     target_points = fk_sampler.sample_end_effector(
         torch.as_tensor(target.matrix).type_as(robot_points).unsqueeze(0),
+        tool_dim,
+        tool_offset,
+        tool_quat,
         num_points=NUM_TARGET_POINTS,
     )
     xyz = torch.cat(
@@ -117,6 +134,9 @@ def rollout_until_success(
     target: SE3,
     point_cloud: torch.Tensor,
     fk_sampler: FrankaSampler,
+    tool_dim: List[float],
+    tool_offset: List[float],
+    tool_quat: List[float],
 ) -> np.ndarray:
     """
     Rolls out the policy until the success criteria are met. The criteria are that the
@@ -150,7 +170,9 @@ def rollout_until_success(
     success = False
 
     def sampler(config):
-        return fk_sampler.sample(config, NUM_ROBOT_POINTS)
+        return fk_sampler.sample(
+            config, tool_dim, tool_offset, tool_quat, NUM_ROBOT_POINTS
+        )
 
     for i in range(MAX_ROLLOUT_LENGTH):
         q_norm = torch.clamp(q_norm + mdl(point_cloud, q_norm, target_pose_input), min=-1, max=1)
@@ -253,12 +275,23 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
         for problem_type, problem_set in scene_sets.items():
             eval.create_new_group(f"{scene_type}, {problem_type}")
             for problem in tqdm(problem_set, leave=False):
+                if problem.tool:
+                    tool_dim = problem.tool.dims
+                    tool_offset = problem.tool.offset
+                    tool_quat = problem.tool.offset_quaternion
+                else:
+                    tool_dim = [0.0, 0.0, 0.0]
+                    tool_offset = [0.0, 0.0, 0.0]
+                    tool_quat = [1.0, 0.0, 0.0, 0.0]
                 if problem.obstacle_point_cloud is None:
                     point_cloud = make_point_cloud_from_primitives(
                         torch.as_tensor(problem.q0).unsqueeze(0),
                         problem.target,
                         problem.obstacles,
                         cpu_fk_sampler,
+                        tool_dim,
+                        tool_offset,
+                        tool_quat,
                     )
                 else:
                     assert len(problem.obstacles) > 0
@@ -267,6 +300,9 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
                         problem.target,
                         problem.obstacle_point_cloud,
                         cpu_fk_sampler,
+                        tool_dim,
+                        tool_offset,
+                        tool_quat,
                     )
                 start_time = time.time()
                 trajectory = rollout_until_success(
@@ -275,6 +311,9 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
                     problem.target,
                     point_cloud.unsqueeze(0).cuda(),
                     gpu_fk_sampler,
+                    tool_dim,
+                    tool_offset,
+                    tool_quat,
                 )
                 eval.evaluate_trajectory(
                     trajectory,
@@ -326,6 +365,14 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
     for scene_type, scene_sets in problems.items():
         for problem_type, problem_set in scene_sets.items():
             for problem in tqdm(problem_set, leave=False):
+                if problem.tool:
+                    tool_dim = problem.tool.dims
+                    tool_offset = problem.tool.offset
+                    tool_quat = problem.tool.offset_quaternion
+                else:
+                    tool_dim = [0.0, 0.0, 0.0]
+                    tool_offset = [0.0, 0.0, 0.0]
+                    tool_quat = [1.0, 0.0, 0.0, 0.0]
                 eval.create_new_group(f"{scene_type}, {problem_type}")
                 if problem.obstacle_point_cloud is None:
                     point_cloud = make_point_cloud_from_primitives(
@@ -333,6 +380,9 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
                         problem.target,
                         problem.obstacles,
                         cpu_fk_sampler,
+                        tool_dim,
+                        tool_offset,
+                        tool_quat,
                     )
                 else:
                     point_cloud = make_point_cloud_from_problem(
@@ -340,6 +390,9 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
                         problem.target,
                         problem.obstacle_point_cloud,
                         cpu_fk_sampler,
+                        tool_dim,
+                        tool_offset,
+                        tool_quat,
                     )
                 start_time = time.time()
                 trajectory = rollout_until_success(
@@ -348,6 +401,9 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
                     problem.target,
                     point_cloud.unsqueeze(0).cuda(),
                     gpu_fk_sampler,
+                    tool_dim,
+                    tool_offset,
+                    tool_quat,
                 )
                 if problem.obstacles is not None:
                     eval.evaluate_trajectory(
@@ -449,6 +505,13 @@ if __name__ == "__main__":
         help="Number of problems to visualize (default: all)",
     )
     args = parser.parse_args()
+
+    # HACK: The pickle file was created with a different module structure
+    # This remaps the old module path to the new one so pickle can find the classes
+    from mpinets import mpinets_types
+    sys.modules['data_pipeline.environments.base_environment'] = mpinets_types
+    sys.modules['mpinets.data_pipeline.environments.base_environment'] = mpinets_types
+
     with open(args.problems, "rb") as f:
         problems = pickle.load(f)
     env_type = args.environment_type.replace("-", "_")

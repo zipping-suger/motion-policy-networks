@@ -8,6 +8,7 @@ from geometrout.transform import SE3, SO3
 from pyquaternion import Quaternion
 import argparse
 import pickle
+import sys
 
 from robofin.robots import FrankaRobot, FrankaGripper
 from robofin.bullet import BulletController, Bullet
@@ -30,15 +31,6 @@ NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
 MAX_ROLLOUT_LENGTH = 75
 GOAL_THRESHOLD = 0.01  # 1 cm threshold for goal reaching
-
-# attached_primitive = None
-attached_primitive = {
-    'type': 'cuboid',
-    'dims': [0.05, 0.05, 0.2],
-    'num_points': 300,
-    'offset': [0, 0, 0.1],  # 10cm in front of the end-effector
-    'offset_quaternion': [1, 0, 0, 0]  # No rotation offset (identity quaternion)
-}
 
 
 def create_point_cloud(robot_points, obstacle_points, target_points):
@@ -248,7 +240,7 @@ if __name__ == "__main__":
     model = MotionPolicyNetwork.load_from_checkpoint(args.mdl_path).cuda()
     model.eval()
 
-    gpu_fk_sampler = FrankaSampler("cuda:0", use_cache=True, attached_primitive=attached_primitive)
+    gpu_fk_sampler = FrankaSampler("cuda:0", use_cache=True)
 
     sim = BulletController(hz=12, substeps=20, gui=True)
     franka = sim.load_robot(FrankaRobot)
@@ -256,6 +248,12 @@ if __name__ == "__main__":
 
     # Set camera
     sim.set_camera_position(yaw=-90, pitch=-30, distance=2.5, target=[0.0, 0.0, 0.5])
+
+    # HACK: The pickle file was created with a different module structure
+    # This remaps the old module path to the new one so pickle can find the classes
+    from mpinets import mpinets_types
+    sys.modules['data_pipeline.environments.base_environment'] = mpinets_types
+    sys.modules['mpinets.data_pipeline.environments.base_environment'] = mpinets_types
 
     # Load problems from pickle file
     with open(args.problems, "rb") as f:
@@ -287,19 +285,36 @@ if __name__ == "__main__":
 
     problem: PlanningProblem = filtered_problems[args.problem_idx]
     print(
-        f"\n======= Visualizing problem {args.problem_idx} (Env: {env_type_arg}, Problem Type: {problem_type_arg}) ======="
+        f"\n======= Visualizing problem {args.problem_idx} "
+        f"(Env: {env_type_arg}, Problem Type: {problem_type_arg}) ======="
     )
+
+    # Get tool parameters from the problem, or use defaults
+    if problem.tool:
+        tool_dim = problem.tool.dims
+        tool_offset = problem.tool.offset
+        tool_quat = problem.tool.offset_quaternion
+        print(f"Using tool with dims: {tool_dim}")
+    else:
+        tool_dim = [0.0, 0.0, 0.0]
+        tool_offset = [0.0, 0.0, 0.0]
+        tool_quat = [1.0, 0.0, 0.0, 0.0]  # w, x, y, z for identity
 
     # Precompute obstacle points once based on the chosen method
     if args.use_depth:
-        # Define a camera pose for rendering, this one is from `run_inference.py` for 'tabletop'
-        # In a real application, this would be a real sensor pose.
+        # Define a camera pose for rendering, this one is from `run_inference.py`
+        # for 'tabletop'. In a real application, this would be a real sensor pose.
         # You may need to change this based on the environment type.
 
         # # tabletop camera pose
         # cam_pose = SE3(
         #     xyz=[1.5031788593125708, -1.817341016921562, 1.278088299149147],
-        #     quaternion=[0.8687241016192855, 0.4180885960330695, 0.11516106409944685, 0.23928704613569252],
+        #     quaternion=[
+        #         0.8687241016192855,
+        #         0.4180885960330695,
+        #         0.11516106409944685,
+        #         0.23928704613569252,
+        #     ],
         # ).inverse
 
         # cubby camera pose
@@ -328,14 +343,18 @@ if __name__ == "__main__":
 
         # Sample NUM_OBSTACLE_POINTS from the full point cloud
         if len(all_obstacle_points) > NUM_OBSTACLE_POINTS:
-            random_indices = np.random.choice(len(all_obstacle_points), size=NUM_OBSTACLE_POINTS, replace=False)
+            random_indices = np.random.choice(
+                len(all_obstacle_points), size=NUM_OBSTACLE_POINTS, replace=False
+            )
             obstacle_points = all_obstacle_points[random_indices, :]
         else:
             obstacle_points = all_obstacle_points
 
         print("Using depth camera for obstacle point cloud.")
     else:
-        obstacle_points = construct_mixed_point_cloud(problem.obstacles, NUM_OBSTACLE_POINTS)
+        obstacle_points = construct_mixed_point_cloud(
+            problem.obstacles, NUM_OBSTACLE_POINTS
+        )
         print("Using primitive-based point cloud.")
 
     obstacle_points_tensor = torch.tensor(
@@ -352,14 +371,26 @@ if __name__ == "__main__":
     target_franka.marionette(target_pose)
 
     # Initial point cloud construction and visualization
+    q0_tensor = torch.tensor(
+        problem.q0, dtype=torch.float32, device="cuda:0"
+    ).unsqueeze(0)
     initial_robot_points = gpu_fk_sampler.sample(
-        torch.tensor(problem.q0, dtype=torch.float32, device="cuda:0").unsqueeze(0), 
-        NUM_ROBOT_POINTS
+        q0_tensor,
+        tool_dim,
+        tool_offset,
+        tool_quat,
+        NUM_ROBOT_POINTS,
     ).squeeze(0)
 
+    target_pose_tensor = torch.tensor(
+        target_pose.matrix, dtype=torch.float32, device="cuda:0"
+    ).unsqueeze(0)
     target_points = gpu_fk_sampler.sample_end_effector(
-        torch.tensor(target_pose.matrix, dtype=torch.float32, device="cuda:0").unsqueeze(0),
-        NUM_TARGET_POINTS
+        target_pose_tensor,
+        tool_dim,
+        tool_offset,
+        tool_quat,
+        NUM_TARGET_POINTS,
     ).squeeze(0)
 
     # Create the full point cloud for visualization
@@ -372,8 +403,12 @@ if __name__ == "__main__":
         dim=0,
     )
     initial_point_cloud[:NUM_ROBOT_POINTS, :3] = initial_robot_points.float()
-    initial_point_cloud[NUM_ROBOT_POINTS:NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS, :3] = obstacle_points_tensor.float()
-    initial_point_cloud[NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS:, :3] = target_points.float()
+    initial_point_cloud[
+        NUM_ROBOT_POINTS : NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS, :3
+    ] = obstacle_points_tensor.float()
+    initial_point_cloud[
+        NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS :, :3
+    ] = target_points.float()
 
     update_meshcat_point_cloud(viz, initial_point_cloud)
     current_point_cloud = initial_point_cloud.clone()
@@ -394,13 +429,21 @@ if __name__ == "__main__":
         if moved:
             target_franka.marionette(target_pose)
             # Update target points and point cloud visualization
+            target_pose_tensor = torch.tensor(
+                target_pose.matrix, dtype=torch.float32, device="cuda:0"
+            ).unsqueeze(0)
             target_points = gpu_fk_sampler.sample_end_effector(
-                torch.tensor(target_pose.matrix, dtype=torch.float32, device="cuda:0").unsqueeze(0),
-                NUM_TARGET_POINTS
+                target_pose_tensor,
+                tool_dim,
+                tool_offset,
+                tool_quat,
+                NUM_TARGET_POINTS,
             ).squeeze(0)
 
             # Update the point cloud with new target points
-            current_point_cloud[NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS:, :3] = target_points.float()
+            current_point_cloud[
+                NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS :, :3
+            ] = target_points.float()
             update_meshcat_point_cloud(viz, current_point_cloud)
 
         sim.step()
@@ -408,7 +451,8 @@ if __name__ == "__main__":
 
         # Update robot mesh in Meshcat
         sim_config, _ = franka.get_joint_states()
-        for idx, (mesh, transform) in enumerate(urdf.visual_trimesh_fk(sim_config[:8]).items()):
+        fk_map = urdf.visual_trimesh_fk(sim_config[:8])
+        for idx, (mesh, transform) in enumerate(fk_map.items()):
             viz[f"robot/{idx}"].set_transform(transform)
 
         if key == 27:  # ESC
@@ -435,7 +479,7 @@ if __name__ == "__main__":
             ).unsqueeze(0)
 
             target_points = gpu_fk_sampler.sample_end_effector(
-                target_pose_mat, NUM_TARGET_POINTS
+                target_pose_mat, tool_dim, tool_offset, tool_quat, NUM_TARGET_POINTS
             ).squeeze(0)
 
             # Construct the target pose input for the model
@@ -459,7 +503,7 @@ if __name__ == "__main__":
             for i in range(MAX_ROLLOUT_LENGTH):
                 # Sample points
                 robot_points = gpu_fk_sampler.sample(
-                    current_q, NUM_ROBOT_POINTS
+                    current_q, tool_dim, tool_offset, tool_quat, NUM_ROBOT_POINTS
                 ).squeeze(0)
 
                 # Create point cloud for visualization
@@ -472,8 +516,12 @@ if __name__ == "__main__":
                     dim=0,
                 )
                 xyz_vis[:NUM_ROBOT_POINTS, :3] = robot_points.float()
-                xyz_vis[NUM_ROBOT_POINTS:NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS, :3] = obstacle_points_tensor.float()
-                xyz_vis[NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS:, :3] = target_points.float()
+                xyz_vis[
+                    NUM_ROBOT_POINTS : NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS, :3
+                ] = obstacle_points_tensor.float()
+                xyz_vis[
+                    NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS :, :3
+                ] = target_points.float()
 
                 # Update Meshcat visualization
                 update_meshcat_point_cloud(viz, xyz_vis)
@@ -492,7 +540,8 @@ if __name__ == "__main__":
 
                 # Update robot mesh in Meshcat
                 sim_config, _ = franka.get_joint_states()
-                for idx, (mesh, transform) in enumerate(urdf.visual_trimesh_fk(sim_config[:8]).items()):
+                fk_map = urdf.visual_trimesh_fk(sim_config[:8])
+                for idx, (mesh, transform) in enumerate(fk_map.items()):
                     viz[f"robot/{idx}"].set_transform(transform)
 
                 # Check termination
@@ -509,14 +558,15 @@ if __name__ == "__main__":
             franka.marionette(trajectory[0])
             time.sleep(0.2)
 
-            print(f"Executing policy trajectory...")
+            print("Executing policy trajectory...")
             for q in tqdm(trajectory):
                 franka.control_position(q)
                 sim.step()
 
                 # Update robot mesh in Meshcat
                 sim_config, _ = franka.get_joint_states()
-                for idx, (mesh, transform) in enumerate(urdf.visual_trimesh_fk(sim_config[:8]).items()):
+                fk_map = urdf.visual_trimesh_fk(sim_config[:8])
+                for idx, (mesh, transform) in enumerate(fk_map.items()):
                     viz[f"robot/{idx}"].set_transform(transform)
 
                 time.sleep(0.08)
