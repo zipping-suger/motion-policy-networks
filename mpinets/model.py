@@ -14,6 +14,7 @@ from typing import List, Tuple, Sequence, Dict, Callable
 
 from torch_geometric.nn import MLP, PointNetConv, fps, radius
 from torch_geometric.utils import to_dense_batch
+from torch.optim.lr_scheduler import LambdaLR
 
 from mpinets.transformer import (
     Encoder,
@@ -268,9 +269,36 @@ class TrainingMotionPolicyNetwork(MotionPolicyTransformer):
         self.collision_sampler = None
         self.loss_fun = loss.CollisionAndBCLossContainer()
 
+    # def configure_optimizers(self):
+    #     optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+    #     return optimizer
+    
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
-        return optimizer
+        """
+        Configures the optimizer and scheduler.
+        """
+        min_lr = 1e-5
+        max_lr = 5e-5
+
+        optimizer = torch.optim.AdamW(
+            self.parameters(), lr=min_lr, weight_decay=1e-4, betas=(0.9, 0.95)
+        )
+
+        # Lambda function for the linear warmup
+        def lr_lambda(step):
+            lr = min_lr + (max_lr - min_lr) * min(
+                1.0, step / self.warmup_steps
+            )
+            return lr / min_lr
+
+        # Scheduler
+        scheduler = {
+            "scheduler": LambdaLR(optimizer, lr_lambda),
+            "interval": "step",
+            "frequency": 1,
+        }
+
+        return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
     def rollout(
         self,
