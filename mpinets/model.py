@@ -249,6 +249,9 @@ class TrainingMotionPolicyNetwork(MotionPolicyTransformer):
         num_robot_points: int,
         point_match_loss_weight: float,
         collision_loss_weight: float,
+        min_lr: float = 1e-5,
+        max_lr: float = 5e-5,
+        warmup_steps: int = 5000,
     ):
         """
         Creates the network and assigns additional parameters for training
@@ -259,12 +262,16 @@ class TrainingMotionPolicyNetwork(MotionPolicyTransformer):
         :param point_match_loss_weight float: The weight assigned to the behavior
                                               cloning loss.
         :param collision_loss_weight float: The weight assigned to the collision loss
+        :param warmup_steps int: The number of warmup steps for the learning rate scheduler.
         :rtype Self: An instance of the network
         """
         super().__init__(num_robot_points=num_robot_points)
         self.num_robot_points = num_robot_points
         self.point_match_loss_weight = point_match_loss_weight
         self.collision_loss_weight = collision_loss_weight
+        self.min_lr = min_lr
+        self.max_lr = max_lr
+        self.warmup_steps = warmup_steps
         self.fk_sampler = None
         self.collision_sampler = None
         self.loss_fun = loss.CollisionAndBCLossContainer()
@@ -272,24 +279,22 @@ class TrainingMotionPolicyNetwork(MotionPolicyTransformer):
     # def configure_optimizers(self):
     #     optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
     #     return optimizer
-    
+
     def configure_optimizers(self):
         """
         Configures the optimizer and scheduler.
         """
-        min_lr = 1e-5
-        max_lr = 5e-5
 
         optimizer = torch.optim.AdamW(
-            self.parameters(), lr=min_lr, weight_decay=1e-4, betas=(0.9, 0.95)
+            self.parameters(), lr=self.min_lr, weight_decay=1e-4, betas=(0.9, 0.95)
         )
 
         # Lambda function for the linear warmup
         def lr_lambda(step):
-            lr = min_lr + (max_lr - min_lr) * min(
+            lr = self.min_lr + (self.max_lr - self.min_lr) * min(
                 1.0, step / self.warmup_steps
             )
-            return lr / min_lr
+            return lr / self.min_lr
 
         # Scheduler
         scheduler = {
