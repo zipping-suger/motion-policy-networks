@@ -121,45 +121,51 @@ class CollisionAndBCLossContainer:
         start_tool_dims: torch.Tensor,
         start_tool_offset: torch.Tensor,
         start_tool_quaternion: torch.Tensor,
+        start_tool_num_primitives: torch.Tensor,
         target_normalized: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        This method calculates both constituent loss function after loading,
-        and then caching, a fixed robot point cloud sampler (i.e. the task
-        spaces sampled are always the same, as opposed to a random point cloud).
-        The fixed point cloud is important for loss calculation so that
-        it's possible to take mse between the two pointclouds.
-
-        :param input_normalized torch.Tensor: Has dim [B, 7] and is always between -1 and 1
-        :param cuboid_centers torch.Tensor: Has dim [B, M1, 3]
-        :param cuboid_dims torch.Tensor: Has dim [B, M1, 3]
-        :param cuboid_quaternions torch.Tensor: Has dim [B, M1, 4]. Quaternion is formatted as w, x, y, z.
-        :param cylinder_centers torch.Tensor: Has dim [B, M2, 3]
-        :param cylinder_radii torch.Tensor: Has dim [B, M2, 1]
-        :param cylinder_heights torch.Tensor: Has dim [B, M2, 1]
-        :param cylinder_quaternions torch.Tensor: Has dim [B, M2, 4]. Quaternion is formatted as w, x, y, z.
-        :param target_normalized torch.Tensor: Has dim [B, 7] and is always between -1 and 1
-        :rtype Tuple[torch.Tensor, torch.Tensor]: The two losses aggregated over the batch
-        """
         if self.fk_sampler is None:
             self.fk_sampler = FrankaSampler(
                 input_normalized.device,
-                num_fixed_points=self.num_points,
+                num_fixed_points=self.num_points,  # Set fixed points here
                 use_cache=True,
-                with_base_link=False,  # Remove base link because this isn't controllable anyway
+                with_base_link=False,
             )
-        input_pc = self.fk_sampler.sample(
-            utils.unnormalize_franka_joints(input_normalized),
-            start_tool_dims,
-            start_tool_offset,
-            start_tool_quaternion,
-        )
-        target_pc = self.fk_sampler.sample(
-            utils.unnormalize_franka_joints(target_normalized),
-            start_tool_dims,
-            start_tool_offset,
-            start_tool_quaternion,
-        )
+
+        # Check if we need composite sampling
+        if torch.any(start_tool_num_primitives > 1):
+            input_pc = self.fk_sampler.sample_composite(
+                utils.unnormalize_franka_joints(input_normalized),
+                start_tool_dims,
+                start_tool_offset,
+                start_tool_quaternion,
+                start_tool_num_primitives,
+                num_points=None,  # Pass None since we're using fixed points
+            )
+            target_pc = self.fk_sampler.sample_composite(
+                utils.unnormalize_franka_joints(target_normalized),
+                start_tool_dims,
+                start_tool_offset,
+                start_tool_quaternion,
+                start_tool_num_primitives,
+                num_points=None,  # Pass None since we're using fixed points
+            )
+        else:
+            input_pc = self.fk_sampler.sample(
+                utils.unnormalize_franka_joints(input_normalized),
+                start_tool_dims,
+                start_tool_offset,
+                start_tool_quaternion,
+                num_points=None,  # Pass None since we're using fixed points
+            )
+            target_pc = self.fk_sampler.sample(
+                utils.unnormalize_franka_joints(target_normalized),
+                start_tool_dims,
+                start_tool_offset,
+                start_tool_quaternion,
+                num_points=None,  # Pass None since we're using fixed points
+            )
+
         return (
             collision_loss(
                 input_pc,

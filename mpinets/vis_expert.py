@@ -157,10 +157,13 @@ def run_visualization_for_problem_idx(
     data = dataset[problem_idx]
     expert_trajectory = get_expert_trajectory(dataset, problem_idx)
 
-    # --- Get tool info from data ---
-    tool_dims = data.get("start_tool_dims", torch.zeros(3))
-    tool_offset = data.get("start_tool_offset", torch.zeros(3))
-    tool_quat = data.get("start_tool_quaternion", torch.tensor([1.0, 0.0, 0.0, 0.0]))
+    # --- Get composite tool info from data ---
+    start_tool_dims = data.get("start_tool_dims", torch.zeros((1, 3)))
+    start_tool_offset = data.get("start_tool_offset", torch.zeros((1, 3)))
+    start_tool_quat = data.get(
+        "start_tool_quaternion", torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    )
+    start_tool_num_primitives = data.get("start_tool_num_primitives", torch.tensor(1))
 
     # Setup samplers
     try:
@@ -172,9 +175,10 @@ def run_visualization_for_problem_idx(
         device = "cpu"
 
     # Move tool tensors to the correct device
-    tool_dims = tool_dims.to(device)
-    tool_offset = tool_offset.to(device)
-    tool_quat = tool_quat.to(device)
+    start_tool_dims = start_tool_dims.to(device)
+    start_tool_offset = start_tool_offset.to(device)
+    start_tool_quat = start_tool_quat.to(device)
+    start_tool_num_primitives = start_tool_num_primitives.to(device)
 
     # Create obstacles and target pose
     obstacles = primitives_from_dataset_data(data)
@@ -184,6 +188,7 @@ def run_visualization_for_problem_idx(
 
     print(f"\n======= Visualizing Expert Trajectory for problem {problem_idx} =======")
     print(f"Trajectory length: {len(expert_trajectory)} steps")
+    print(f"Number of tool primitives: {start_tool_num_primitives.cpu().numpy()}")
 
     # --- Precompute Static Point Clouds ---
     # 1. Obstacle points (static)
@@ -192,8 +197,15 @@ def run_visualization_for_problem_idx(
     target_pose_mat = torch.tensor(
         target_pose.matrix, dtype=torch.float32, device=device
     ).unsqueeze(0)
-    target_points = gpu_fk_sampler.sample_end_effector(
-        target_pose_mat, tool_dims, tool_offset, tool_quat, NUM_TARGET_POINTS
+
+    # Use composite sampling for target points
+    target_points = gpu_fk_sampler.sample_composite_end_effector(
+        target_pose_mat,
+        start_tool_dims,
+        start_tool_offset,
+        start_tool_quat,
+        start_tool_num_primitives,
+        NUM_TARGET_POINTS,
     ).squeeze(0)
 
     # --- Simulation Setup ---
@@ -207,9 +219,17 @@ def run_visualization_for_problem_idx(
     initial_q_tensor = torch.tensor(
         start_config, dtype=torch.float32, device=device
     ).unsqueeze(0)
-    initial_robot_points = gpu_fk_sampler.sample(
-        initial_q_tensor, tool_dims, tool_offset, tool_quat, NUM_ROBOT_POINTS
+
+    # Use composite sampling for robot points
+    initial_robot_points = gpu_fk_sampler.sample_composite(
+        initial_q_tensor,
+        start_tool_dims,
+        start_tool_offset,
+        start_tool_quat,
+        start_tool_num_primitives,
+        NUM_ROBOT_POINTS,
     ).squeeze(0)
+
     sim_config, _ = franka.get_joint_states()
     for idx, (mesh, transform) in enumerate(
         urdf.visual_trimesh_fk(sim_config[:8]).items()
@@ -235,9 +255,17 @@ def run_visualization_for_problem_idx(
         current_q_tensor = torch.tensor(
             sim_config[:7], dtype=torch.float32, device=device
         ).unsqueeze(0)
-        current_robot_points = gpu_fk_sampler.sample(
-            current_q_tensor, tool_dims, tool_offset, tool_quat, NUM_ROBOT_POINTS
+
+        # Use composite sampling for current robot points
+        current_robot_points = gpu_fk_sampler.sample_composite(
+            current_q_tensor,
+            start_tool_dims,
+            start_tool_offset,
+            start_tool_quat,
+            start_tool_num_primitives,
+            NUM_ROBOT_POINTS,
         ).squeeze(0)
+
         update_meshcat_point_cloud(
             viz, current_robot_points, obstacle_points_np, target_points
         )

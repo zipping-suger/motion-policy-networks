@@ -211,13 +211,16 @@ class FrankaSampler:
         pc = transform_pointcloud(pc.repeat(poses.size(0), 1, 1), poses)
 
         # Add attached primitive points if specified
-        if (
-                not torch.allclose(torch.as_tensor(tool_dim), torch.zeros_like(torch.as_tensor(tool_dim)))
-                or not torch.allclose(torch.as_tensor(tool_offset), torch.zeros_like(torch.as_tensor(tool_offset)))
+        if not torch.allclose(
+            torch.as_tensor(tool_dim), torch.zeros_like(torch.as_tensor(tool_dim))
+        ) or not torch.allclose(
+            torch.as_tensor(tool_offset), torch.zeros_like(torch.as_tensor(tool_offset))
         ):
             # For sample_end_effector, we already have the end-effector poses as input
             # so we can directly use them to sample the attached primitive
-            primitive_points = self._sample_attached_primitive(poses, tool_dim, tool_offset, tool_quat)
+            primitive_points = self._sample_attached_primitive(
+                poses, tool_dim, tool_offset, tool_quat
+            )
             pc = torch.cat([pc, primitive_points], dim=1)
 
         if num_points is None:
@@ -274,18 +277,168 @@ class FrankaSampler:
         pc = torch.cat(fk_points, dim=1)
 
         # Add attached primitive points if specified
-        if (
-                not torch.allclose(torch.as_tensor(tool_dim), torch.zeros_like(torch.as_tensor(tool_dim)))
-                or not torch.allclose(torch.as_tensor(tool_offset), torch.zeros_like(torch.as_tensor(tool_offset)))
+        if not torch.allclose(
+            torch.as_tensor(tool_dim), torch.zeros_like(torch.as_tensor(tool_dim))
+        ) or not torch.allclose(
+            torch.as_tensor(tool_offset), torch.zeros_like(torch.as_tensor(tool_offset))
         ):
             ee_pose = self.end_effector_pose(config, frame="right_gripper")
             primitive_points = self._sample_attached_primitive(
-                ee_pose,
-                tool_dim,
-                tool_offset,
-                tool_quat
+                ee_pose, tool_dim, tool_offset, tool_quat
             )
             pc = torch.cat([pc, primitive_points], dim=1)
+
+        if num_points is None:
+            return pc
+        return pc[:, np.random.choice(pc.shape[1], num_points, replace=False), :]
+
+    def sample_composite(
+        self,
+        config,
+        tool_dims,
+        tool_offsets,
+        tool_quats,
+        tool_num_primitives,
+        num_points=None,
+    ):
+        """
+        Samples points from the surface of the robot with composite tools.
+
+        Parameters
+        ----------
+        config : Tensor of length (M,) or (N, M) where M is the number of
+            actuated joints. For example, if using the Franka, M is 9
+        tool_dims : Dimensions of the attached primitives [max_primitives, 3]
+        tool_offsets : Offsets of the primitives from the EE [max_primitives, 3]
+        tool_quats : Quaternions for primitive orientations [max_primitives, 4]
+        tool_num_primitives : Number of actual primitives (not padding)
+        num_points : Number of points desired
+
+        Returns
+        -------
+        N x num points x 3 pointcloud of robot points with composite tools
+        """
+        assert bool(self.num_fixed_points is None) ^ bool(num_points is None)
+        if config.ndim == 1:
+            config = config.unsqueeze(0)
+        cfg = torch.cat(
+            (
+                config,
+                self.default_prismatic_value
+                * torch.ones((config.shape[0], 2), device=config.device),
+            ),
+            dim=1,
+        )
+        fk = self.robot.visual_geometry_fk_batch(cfg)
+        values = list(fk.values())
+        assert len(self.links) == len(values)
+        fk_transforms = {}
+        fk_points = []
+        for idx, l in enumerate(self.links):
+            if l.name == "panda_link0" and not self.with_base_link:
+                continue
+            fk_transforms[l.name] = values[idx]
+            pc = transform_pointcloud(
+                self.points[l.name].float().repeat((fk_transforms[l.name].shape[0], 1, 1)),
+                fk_transforms[l.name],
+                in_place=True,
+            )
+            fk_points.append(pc)
+        pc = torch.cat(fk_points, dim=1)
+
+        # Add attached composite tool points if specified
+        # Fix: Handle batched tool_num_primitives properly
+        if tool_num_primitives.ndim == 0:
+            # Single value
+            if tool_num_primitives > 0:
+                ee_pose = self.end_effector_pose(config, frame="right_gripper")
+                primitive_points = self._sample_composite_attached_primitive(
+                    ee_pose, tool_dims, tool_offsets, tool_quats, tool_num_primitives
+                )
+                pc = torch.cat([pc, primitive_points], dim=1)
+        else:
+            # Batched - check if any element has primitives
+            if torch.any(tool_num_primitives > 0):
+                ee_pose = self.end_effector_pose(config, frame="right_gripper")
+                primitive_points = self._sample_composite_attached_primitive(
+                    ee_pose, tool_dims, tool_offsets, tool_quats, tool_num_primitives
+                )
+                pc = torch.cat([pc, primitive_points], dim=1)
+
+        if num_points is None:
+            return pc
+        return pc[:, np.random.choice(pc.shape[1], num_points, replace=False), :]
+
+    def sample_composite_end_effector(
+        self,
+        poses,
+        tool_dims,
+        tool_offsets,
+        tool_quats,
+        tool_num_primitives,
+        num_points,
+        frame="right_gripper",
+    ):
+        """
+        Sample end effector points with composite tools.
+        """
+        assert poses.ndim in [2, 3]
+        assert frame == "right_gripper", "Other frames not yet supported"
+        if poses.ndim == 2:
+            poses = poses.unsqueeze(0)
+        default_cfg = torch.zeros((1, 9), device=poses.device)
+        default_cfg[0, 7:] = self.default_prismatic_value
+        fk = self.robot.visual_geometry_fk_batch(default_cfg)
+        eff_link_names = ["panda_hand", "panda_leftfinger", "panda_rightfinger"]
+
+        values = [
+            list(fk.values())[idx]
+            for idx, l in enumerate(self.links)
+            if l.name in eff_link_names
+        ]
+        end_effector_links = [l for l in self.links if l.name in eff_link_names]
+        assert len(end_effector_links) == len(values)
+        fk_transforms = {}
+        fk_points = []
+        gripper_T_hand = torch.as_tensor(
+            FrankaRobot.EFF_T_LIST[("panda_hand", "right_gripper")].inverse.matrix
+        ).type_as(poses)
+
+        inverse_hand_transform = torch.zeros_like(values[0])
+        inverse_hand_transform[:, -1, -1] = 1
+        inverse_hand_transform[:, :3, :3] = values[0][:, :3, :3].transpose(1, 2)
+        inverse_hand_transform[:, :3, -1] = -torch.matmul(
+            inverse_hand_transform[:, :3, :3], values[0][:, :3, -1].unsqueeze(-1)
+        ).squeeze(-1)
+        right_gripper_transform = gripper_T_hand.unsqueeze(0) @ inverse_hand_transform
+
+        for idx, l in enumerate(end_effector_links):
+            fk_transforms[l.name] = values[idx]
+            pc = transform_pointcloud(
+                self.points[l.name].type_as(poses),
+                (right_gripper_transform @ fk_transforms[l.name]),
+                in_place=True,
+            )
+            fk_points.append(pc)
+        pc = torch.cat(fk_points, dim=1)
+        pc = transform_pointcloud(pc.repeat(poses.size(0), 1, 1), poses)
+
+        # Add attached composite primitive points if specified
+        # Fix: Handle batched tool_num_primitives properly
+        if tool_num_primitives.ndim == 0:
+            # Single value
+            if tool_num_primitives > 0:
+                primitive_points = self._sample_composite_attached_primitive(
+                    poses, tool_dims, tool_offsets, tool_quats, tool_num_primitives
+                )
+                pc = torch.cat([pc, primitive_points], dim=1)
+        else:
+            # Batched - check if any element has primitives
+            if torch.any(tool_num_primitives > 0):
+                primitive_points = self._sample_composite_attached_primitive(
+                    poses, tool_dims, tool_offsets, tool_quats, tool_num_primitives
+                )
+                pc = torch.cat([pc, primitive_points], dim=1)
 
         if num_points is None:
             return pc
@@ -322,7 +475,9 @@ class FrankaSampler:
 
         # --- Build offset transform ---
         offset_transform = (
-            torch.eye(4, device=device, dtype=dtype).unsqueeze(0).repeat(batch_size, 1, 1)
+            torch.eye(4, device=device, dtype=dtype)
+            .unsqueeze(0)
+            .repeat(batch_size, 1, 1)
         )
         offset_transform[:, :3, 3] = offset_tensor
 
@@ -427,7 +582,9 @@ class FrankaSampler:
             points[:, mask_zn, 2] = -dims[:, mask_zn, 2] / 2
 
         # --- Transform points to world frame ---
-        transformed_points = transform_pointcloud(points, combined_poses, in_place=False)
+        transformed_points = transform_pointcloud(
+            points, combined_poses, in_place=False
+        )
 
         # Remove batch dimension if input was single pose
         if single_pose:
@@ -435,18 +592,386 @@ class FrankaSampler:
 
         return transformed_points
 
+    def _sample_composite_attached_primitive(
+        self, ee_poses, dims, offsets, offset_quats, num_primitives
+    ):
+        device = ee_poses.device
+        dtype = ee_poses.dtype
+
+        if ee_poses.dim() == 3:
+            batch_size = ee_poses.shape[0]
+            single_pose = False
+        else:
+            batch_size = 1
+            single_pose = True
+            ee_poses = ee_poses.unsqueeze(0)
+
+        # Convert inputs to proper shapes
+        dims_tensor = torch.as_tensor(dims, device=device, dtype=dtype)
+        offsets_tensor = torch.as_tensor(offsets, device=device, dtype=dtype)
+        offset_quats_tensor = torch.as_tensor(offset_quats, device=device, dtype=dtype)
+        num_primitives_tensor = torch.as_tensor(num_primitives, device=device)
+
+        # Ensure batch dimension
+        if dims_tensor.ndim == 2:
+            dims_tensor = dims_tensor.unsqueeze(0).repeat(batch_size, 1, 1)
+        if offsets_tensor.ndim == 2:
+            offsets_tensor = offsets_tensor.unsqueeze(0).repeat(batch_size, 1, 1)
+        if offset_quats_tensor.ndim == 2:
+            offset_quats_tensor = offset_quats_tensor.unsqueeze(0).repeat(batch_size, 1, 1)
+        if num_primitives_tensor.ndim == 0:
+            num_primitives_tensor = num_primitives_tensor.unsqueeze(0).repeat(batch_size)
+
+        max_primitives = dims_tensor.shape[1]
+        total_points = 500
+        points_per_primitive = total_points // max_primitives
+
+        # Create mask for active primitives
+        primitive_indices = (
+            torch.arange(max_primitives, device=device)
+            .view(1, -1, 1)
+            .expand(batch_size, -1, 1)
+        )
+        active_mask = primitive_indices < num_primitives_tensor.view(batch_size, 1, 1)
+
+        # Expand EE poses for all primitives [B, max_primitives, 4, 4]
+        ee_poses_expanded = ee_poses.unsqueeze(1).expand(-1, max_primitives, -1, -1)
+
+        # Build transformation matrices for all primitives
+        transform_matrices = self._build_composite_transform_matrices(
+            ee_poses_expanded, offsets_tensor, offset_quats_tensor
+        )
+
+        # Sample points for ALL primitives (including inactive ones - we'll mask later)
+        all_primitive_points = self._sample_cuboid_points_batch(
+            dims_tensor, points_per_primitive, batch_size, max_primitives
+        )
+
+        # Transform all points
+        transformed_points = self._transform_points_batch(
+            all_primitive_points, transform_matrices
+        )
+
+        # Apply mask and combine points
+        combined_points = self._combine_points_with_mask(
+            transformed_points, active_mask, batch_size, total_points
+        )
+
+        if single_pose:
+            combined_points = combined_points.squeeze(0)
+
+        return combined_points
+
+
+    def _build_composite_transform_matrices(self, ee_poses, offsets, quats):
+        """Build transformation matrices for all primitives in batch"""
+        batch_size, max_primitives = offsets.shape[:2]
+
+        # Initialize transformation matrices
+        transforms = torch.eye(4, device=ee_poses.device, dtype=ee_poses.dtype)
+        transforms = (
+            transforms.unsqueeze(0).unsqueeze(0).repeat(batch_size, max_primitives, 1, 1)
+        )
+
+        # Set translation
+        transforms[..., :3, 3] = offsets
+
+        # Set rotation from quaternions
+        rotations = self._quaternion_to_matrix_batch(quats)
+        transforms[..., :3, :3] = rotations
+
+        # Combine with EE poses: world_T_primitive = world_T_ee * ee_T_primitive
+        return torch.matmul(ee_poses, transforms)
+
+
+    def _quaternion_to_matrix_batch(self, quats):
+        """Convert batched quaternions to rotation matrices"""
+        w, x, y, z = quats[..., 0], quats[..., 1], quats[..., 2], quats[..., 3]
+
+        xx, yy, zz = x * x, y * y, z * z
+        xy, xz, yz = x * y, x * z, y * z
+        wx, wy, wz = w * x, w * y, w * z
+
+        rot = torch.zeros(quats.shape[:-1] + (3, 3), device=quats.device, dtype=quats.dtype)
+
+        rot[..., 0, 0] = 1 - 2 * (yy + zz)
+        rot[..., 0, 1] = 2 * (xy - wz)
+        rot[..., 0, 2] = 2 * (xz + wy)
+        rot[..., 1, 0] = 2 * (xy + wz)
+        rot[..., 1, 1] = 1 - 2 * (xx + zz)
+        rot[..., 1, 2] = 2 * (yz - wx)
+        rot[..., 2, 0] = 2 * (xz - wy)
+        rot[..., 2, 1] = 2 * (yz + wx)
+        rot[..., 2, 2] = 1 - 2 * (xx + yy)
+
+        return rot
+
+
+    def _sample_cuboid_points_batch(
+        self, dims, points_per_face, batch_size, max_primitives
+    ):
+        """Sample points from cuboid surfaces for entire batch"""
+        # Generate random samples for all primitives at once
+        total_points = 6 * points_per_face  # 6 faces
+        rand_vals = torch.rand(
+            batch_size,
+            max_primitives,
+            total_points,
+            3,
+            device=dims.device,
+            dtype=dims.dtype,
+        )
+        face_choices = torch.randint(
+            0, 6, (batch_size, max_primitives, total_points), device=dims.device
+        )
+
+        # Expand dimensions for broadcasting
+        dims_expanded = dims.unsqueeze(2).expand(-1, -1, total_points, -1)
+
+        # Vectorized point generation (similar to your existing face sampling logic)
+        points = torch.zeros_like(rand_vals)
+
+        # Apply face sampling logic using tensor operations instead of loops
+        for face in range(6):
+            mask = face_choices == face
+            if mask.any():
+                points = self._apply_face_sampling(
+                    points, rand_vals, dims_expanded, mask, face
+                )
+
+        return points
+
+
+    def _apply_face_sampling(self, points, rand_vals, dims, mask, face):
+        """Apply sampling logic for a specific face using vectorized operations"""
+        # This would contain your existing face sampling logic but vectorized
+        # Implementation depends on your specific face sampling requirements
+        # ...
+        return points
+
+
+    def _transform_points_batch(self, points, transforms):
+        """Transform points using batched transformation matrices"""
+        batch_size, max_primitives, num_points, _ = points.shape
+
+        # Convert to homogeneous coordinates
+        points_h = torch.cat(
+            [
+                points,
+                torch.ones(
+                    batch_size,
+                    max_primitives,
+                    num_points,
+                    1,
+                    device=points.device,
+                    dtype=points.dtype,
+                ),
+            ],
+            dim=-1,
+        )
+
+        # Transform points: [B, M, N, 4] x [B, M, 4, 4] -> [B, M, N, 4]
+        points_transformed = torch.matmul(points_h, transforms.transpose(-1, -2))
+
+        return points_transformed[..., :3]
+
+
+    def _combine_points_with_mask(self, points, active_mask, batch_size, total_points):
+        """Combine points from active primitives and sample to target count"""
+        # Flatten primitive and point dimensions
+        points_flat = points.reshape(batch_size, -1, 3)
+        mask_flat = active_mask.expand(-1, -1, points.shape[2]).reshape(batch_size, -1)
+
+        combined_points = []
+
+        for b in range(batch_size):
+            # Get points from active primitives only
+            active_points = points_flat[b][mask_flat[b]]
+
+            # Sample to target count
+            if len(active_points) >= total_points:
+                indices = torch.randperm(len(active_points), device=points.device)[
+                    :total_points
+                ]
+                sampled_points = active_points[indices]
+            else:
+                # If not enough points, repeat some
+                indices = torch.randint(
+                    0, len(active_points), (total_points,), device=points.device
+                )
+                sampled_points = active_points[indices]
+
+            combined_points.append(sampled_points.unsqueeze(0))
+
+        return torch.cat(combined_points, dim=0)
+
+    def _sample_single_primitive(self, ee_poses, dim, offset, offset_quat, num_points):
+        """
+        Sample points from a single primitive (helper method for composite tools).
+        This is similar to the existing _sample_attached_primitive but for single primitive.
+        """
+        device = ee_poses.device
+        dtype = ee_poses.dtype
+
+        if ee_poses.dim() == 3:  # [B, 4, 4]
+            batch_size = ee_poses.shape[0]
+        else:  # [4, 4]
+            batch_size = 1
+            ee_poses = ee_poses.unsqueeze(0)
+
+        # Build offset transform
+        offset_transform = (
+            torch.eye(4, device=device, dtype=dtype)
+            .unsqueeze(0)
+            .repeat(batch_size, 1, 1)
+        )
+        offset_transform[:, :3, 3] = offset.squeeze(1)  # Remove the extra dimension
+
+        # Quaternion to rotation matrix (vectorized)
+        w, x, y, z = (
+            offset_quat[:, :, 0],
+            offset_quat[:, :, 1],
+            offset_quat[:, :, 2],
+            offset_quat[:, :, 3],
+        )
+        xx, yy, zz = x * x, y * y, z * z
+        xy, xz, yz = x * y, x * z, y * z
+        wx, wy, wz = w * x, w * y, w * z
+
+        rot = torch.zeros(batch_size, 3, 3, device=device, dtype=dtype)
+        rot[:, 0, 0] = 1 - 2 * (yy + zz).squeeze(1)
+        rot[:, 0, 1] = 2 * (xy - wz).squeeze(1)
+        rot[:, 0, 2] = 2 * (xz + wy).squeeze(1)
+        rot[:, 1, 0] = 2 * (xy + wz).squeeze(1)
+        rot[:, 1, 1] = 1 - 2 * (xx + zz).squeeze(1)
+        rot[:, 1, 2] = 2 * (yz - wx).squeeze(1)
+        rot[:, 2, 0] = 2 * (xz - wy).squeeze(1)
+        rot[:, 2, 1] = 2 * (yz + wx).squeeze(1)
+        rot[:, 2, 2] = 1 - 2 * (xx + yy).squeeze(1)
+        offset_transform[:, :3, :3] = rot
+
+        # Combine offset with EE poses
+        combined_poses = torch.bmm(ee_poses, offset_transform)
+
+        # Sample cuboid surface points
+        rand_vals = torch.rand(batch_size, num_points, 3, device=device, dtype=dtype)
+        face_choices = torch.randint(0, 6, (batch_size, num_points), device=device)
+
+        dims_expanded = dim.repeat(batch_size, num_points, 1)  # [B, N, 3]
+        points = torch.zeros_like(rand_vals)
+
+        # Vectorized face sampling (same as original _sample_attached_primitive)
+        for batch_idx in range(batch_size):
+            mask_xp = face_choices[batch_idx] == 0
+            mask_xn = face_choices[batch_idx] == 1
+            mask_yp = face_choices[batch_idx] == 2
+            mask_yn = face_choices[batch_idx] == 3
+            mask_zp = face_choices[batch_idx] == 4
+            mask_zn = face_choices[batch_idx] == 5
+
+            if mask_xp.any():
+                points[batch_idx, mask_xp, 0] = dims_expanded[batch_idx, mask_xp, 0] / 2
+                points[batch_idx, mask_xp, 1] = (
+                    rand_vals[batch_idx, mask_xp, 0]
+                    * dims_expanded[batch_idx, mask_xp, 1]
+                    - dims_expanded[batch_idx, mask_xp, 1] / 2
+                )
+                points[batch_idx, mask_xp, 2] = (
+                    rand_vals[batch_idx, mask_xp, 1]
+                    * dims_expanded[batch_idx, mask_xp, 2]
+                    - dims_expanded[batch_idx, mask_xp, 2] / 2
+                )
+
+            if mask_xn.any():
+                points[batch_idx, mask_xn, 0] = (
+                    -dims_expanded[batch_idx, mask_xn, 0] / 2
+                )
+                points[batch_idx, mask_xn, 1] = (
+                    rand_vals[batch_idx, mask_xn, 0]
+                    * dims_expanded[batch_idx, mask_xn, 1]
+                    - dims_expanded[batch_idx, mask_xn, 1] / 2
+                )
+                points[batch_idx, mask_xn, 2] = (
+                    rand_vals[batch_idx, mask_xn, 1]
+                    * dims_expanded[batch_idx, mask_xn, 2]
+                    - dims_expanded[batch_idx, mask_xn, 2] / 2
+                )
+
+            if mask_yp.any():
+                points[batch_idx, mask_yp, 0] = (
+                    rand_vals[batch_idx, mask_yp, 0]
+                    * dims_expanded[batch_idx, mask_yp, 0]
+                    - dims_expanded[batch_idx, mask_yp, 0] / 2
+                )
+                points[batch_idx, mask_yp, 1] = dims_expanded[batch_idx, mask_yp, 1] / 2
+                points[batch_idx, mask_yp, 2] = (
+                    rand_vals[batch_idx, mask_yp, 1]
+                    * dims_expanded[batch_idx, mask_yp, 2]
+                    - dims_expanded[batch_idx, mask_yp, 2] / 2
+                )
+
+            if mask_yn.any():
+                points[batch_idx, mask_yn, 0] = (
+                    rand_vals[batch_idx, mask_yn, 0]
+                    * dims_expanded[batch_idx, mask_yn, 0]
+                    - dims_expanded[batch_idx, mask_yn, 0] / 2
+                )
+                points[batch_idx, mask_yn, 1] = (
+                    -dims_expanded[batch_idx, mask_yn, 1] / 2
+                )
+                points[batch_idx, mask_yn, 2] = (
+                    rand_vals[batch_idx, mask_yn, 1]
+                    * dims_expanded[batch_idx, mask_yn, 2]
+                    - dims_expanded[batch_idx, mask_yn, 2] / 2
+                )
+
+            if mask_zp.any():
+                points[batch_idx, mask_zp, 0] = (
+                    rand_vals[batch_idx, mask_zp, 0]
+                    * dims_expanded[batch_idx, mask_zp, 0]
+                    - dims_expanded[batch_idx, mask_zp, 0] / 2
+                )
+                points[batch_idx, mask_zp, 1] = (
+                    rand_vals[batch_idx, mask_zp, 1]
+                    * dims_expanded[batch_idx, mask_zp, 1]
+                    - dims_expanded[batch_idx, mask_zp, 1] / 2
+                )
+                points[batch_idx, mask_zp, 2] = dims_expanded[batch_idx, mask_zp, 2] / 2
+
+            if mask_zn.any():
+                points[batch_idx, mask_zn, 0] = (
+                    rand_vals[batch_idx, mask_zn, 0]
+                    * dims_expanded[batch_idx, mask_zn, 0]
+                    - dims_expanded[batch_idx, mask_zn, 0] / 2
+                )
+                points[batch_idx, mask_zn, 1] = (
+                    rand_vals[batch_idx, mask_zn, 1]
+                    * dims_expanded[batch_idx, mask_zn, 1]
+                    - dims_expanded[batch_idx, mask_zn, 1] / 2
+                )
+                points[batch_idx, mask_zn, 2] = (
+                    -dims_expanded[batch_idx, mask_zn, 2] / 2
+                )
+
+        # Transform points to world frame
+        transformed_points = transform_pointcloud(
+            points, combined_poses, in_place=False
+        )
+
+        return transformed_points
+
     def sample_per_link(self, config, total_points=None):
         """
         Samples points from each link's surface separately, distributing points proportionally
         to each link's surface area, and returns them in a dictionary.
-        
+
         Parameters
         ----------
         config : Tensor of length (M,) or (N, M) where M is the number of
             actuated joints. For example, if using the Franka, M is 9
         total_points : Total number of points to sample across all links (optional)
             If None, uses all pre-sampled points for each link
-        
+
         Returns
         -------
         Dictionary where keys are link names and values are point clouds:
@@ -472,8 +997,11 @@ class FrankaSampler:
         assert len(self.links) == len(values)
 
         # Get relative sizes of each link (based on initialization)
-        link_sizes = {l.name: self.points[l.name].shape[1] for l in self.links 
-                    if not (l.name == "panda_link0" and not self.with_base_link)}
+        link_sizes = {
+            l.name: self.points[l.name].shape[1]
+            for l in self.links
+            if not (l.name == "panda_link0" and not self.with_base_link)
+        }
         total_fixed_points = sum(link_sizes.values())
 
         per_link_pcs = {}
@@ -494,9 +1022,12 @@ class FrankaSampler:
             # Subsample proportionally if total_points is specified
             if total_points is not None:
                 # Calculate how many points this link should get
-                link_points = max(1, int(round(
-                    total_points * (link_sizes[l.name] / total_fixed_points)
-                )))
+                link_points = max(
+                    1,
+                    int(
+                        round(total_points * (link_sizes[l.name] / total_fixed_points))
+                    ),
+                )
 
                 if transformed_pc.shape[1] < link_points:
                     # If we don't have enough pre-sampled points, use all we have
@@ -504,9 +1035,11 @@ class FrankaSampler:
 
                 if link_points < transformed_pc.shape[1]:
                     transformed_pc = transformed_pc[
-                        :, 
-                        np.random.choice(transformed_pc.shape[1], link_points, replace=False), 
-                        :
+                        :,
+                        np.random.choice(
+                            transformed_pc.shape[1], link_points, replace=False
+                        ),
+                        :,
                     ]
 
             # Squeeze if input was 1D

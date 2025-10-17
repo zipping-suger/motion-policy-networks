@@ -18,21 +18,32 @@ ROLLOUT_LENGTH = 69  # The trajectory length will be ROLLOUT_LENGTH + 1
 
 # Self-collision pairs for Franka Emika Panda robot
 FRANKA_SELF_COLLISION_PAIRS = [
-    ('panda_link0', 'panda_link2'), ('panda_link0', 'panda_link3'),
-    ('panda_link0', 'panda_link4'), ('panda_link0', 'panda_link5'),
-    ('panda_link0', 'panda_link6'), ('panda_link0', 'panda_link7'),
-    ('panda_link0', 'panda_hand'),
-    ('panda_link1', 'panda_link3'), ('panda_link1', 'panda_link4'),
-    ('panda_link1', 'panda_link5'), ('panda_link1', 'panda_link6'),
-    ('panda_link1', 'panda_link7'), ('panda_link1', 'panda_hand'),
-    ('panda_link2', 'panda_link4'), ('panda_link2', 'panda_link5'),
-    ('panda_link2', 'panda_link6'), ('panda_link2', 'panda_link7'),
-    ('panda_link2', 'panda_hand'),
-    ('panda_link3', 'panda_link5'), ('panda_link3', 'panda_link6'),
-    ('panda_link3', 'panda_link7'), ('panda_link3', 'panda_hand'),
-    ('panda_link4', 'panda_link6'), ('panda_link4', 'panda_link7'),
-    ('panda_link4', 'panda_hand'),
-    ('panda_link5', 'panda_hand'),
+    ("panda_link0", "panda_link2"),
+    ("panda_link0", "panda_link3"),
+    ("panda_link0", "panda_link4"),
+    ("panda_link0", "panda_link5"),
+    ("panda_link0", "panda_link6"),
+    ("panda_link0", "panda_link7"),
+    ("panda_link0", "panda_hand"),
+    ("panda_link1", "panda_link3"),
+    ("panda_link1", "panda_link4"),
+    ("panda_link1", "panda_link5"),
+    ("panda_link1", "panda_link6"),
+    ("panda_link1", "panda_link7"),
+    ("panda_link1", "panda_hand"),
+    ("panda_link2", "panda_link4"),
+    ("panda_link2", "panda_link5"),
+    ("panda_link2", "panda_link6"),
+    ("panda_link2", "panda_link7"),
+    ("panda_link2", "panda_hand"),
+    ("panda_link3", "panda_link5"),
+    ("panda_link3", "panda_link6"),
+    ("panda_link3", "panda_link7"),
+    ("panda_link3", "panda_hand"),
+    ("panda_link4", "panda_link6"),
+    ("panda_link4", "panda_link7"),
+    ("panda_link4", "panda_hand"),
+    ("panda_link5", "panda_hand"),
     # Note: 'panda_hand' in the robofin URDF includes the gripper fingers.
 ]
 
@@ -140,9 +151,29 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             batch["target_pose"],
         )
 
+        # Get composite tool parameters
+        start_tool_dims = batch.get(
+            "start_tool_dims", torch.zeros((1, 1, 3), device=xyz.device)
+        )
+        start_tool_offset = batch.get(
+            "start_tool_offset", torch.zeros((1, 1, 3), device=xyz.device)
+        )
+        start_tool_quaternion = batch.get(
+            "start_tool_quaternion",
+            torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], device=xyz.device),
+        )
+        start_tool_num_primitives = batch.get(
+            "start_tool_num_primitives", torch.ones(1, device=xyz.device)
+        )
+
         if q.ndim == 1:
             xyz = xyz.unsqueeze(0)
             q = q.unsqueeze(0)
+            start_tool_dims = start_tool_dims.unsqueeze(0)
+            start_tool_offset = start_tool_offset.unsqueeze(0)
+            start_tool_quaternion = start_tool_quaternion.unsqueeze(0)
+            start_tool_num_primitives = start_tool_num_primitives.unsqueeze(0)
+
         if unnormalize:
             q_unnorm = unnormalize_franka_joints(q)
             assert isinstance(q_unnorm, torch.Tensor)
@@ -161,26 +192,43 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
                 trajectory.append(q)
 
             with torch.no_grad():
-                samples = sampler(
-                    q_unnorm,
-                    batch["start_tool_dims"],
-                    batch["start_tool_offset"],
-                    batch["start_tool_quaternion"],
-                ).type_as(xyz)
+                # Check if we need composite sampling
+                if torch.any(start_tool_num_primitives > 1):
+                    samples = sampler(
+                        q_unnorm,
+                        start_tool_dims,
+                        start_tool_offset,
+                        start_tool_quaternion,
+                        start_tool_num_primitives,
+                    ).type_as(xyz)
+                else:
+                    samples = sampler(
+                        q_unnorm,
+                        start_tool_dims,
+                        start_tool_offset,
+                        start_tool_quaternion,
+                    ).type_as(xyz)
                 xyz[:, : samples.shape[1], :3] = samples
 
         return trajectory
 
     # Differentialble rollout evaluation function with repect to the rollout
     def eval_rollout(
-        self, rollout: List[torch.Tensor], batch: torch.Tensor
-    ) -> torch.Tensor:
+        self, rollout: List[torch.Tensor], batch: Dict[str, torch.Tensor]
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         """
         Evaluates a rollout by computing the difference between the last configuration
         in the rollout and the target configuration, and sums collision loss over the rollout.
         :param rollout List[torch.Tensor]: A list of configurations in the rollout
-        :param target_configuration torch.Tensor: The target configuration to compare against
-        :rtype torch.Tensor: Scalar loss (mean squared error between last and target configuration + collision loss)
+        :param batch: The batch containing target pose and obstacle information
+        :rtype Tuple: Various loss components
         """
         assert len(rollout) > 0, "Rollout must contain at least one configuration"
 
@@ -222,10 +270,26 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             start_tool_dims,
             start_tool_offset,
             start_tool_quaternion,
+            start_tool_num_primitives,
         ) = (
-            batch["start_tool_dims"],
-            batch["start_tool_offset"],
-            batch["start_tool_quaternion"],
+            batch.get(
+                "start_tool_dims",
+                torch.zeros((batch["xyz"].shape[0], 1, 3), device=batch["xyz"].device),
+            ),
+            batch.get(
+                "start_tool_offset",
+                torch.zeros((batch["xyz"].shape[0], 1, 3), device=batch["xyz"].device),
+            ),
+            batch.get(
+                "start_tool_quaternion",
+                torch.tensor(
+                    [[[1.0, 0.0, 0.0, 0.0]]], device=batch["xyz"].device
+                ).repeat(batch["xyz"].shape[0], 1, 1),
+            ),
+            batch.get(
+                "start_tool_num_primitives",
+                torch.ones(batch["xyz"].shape[0], device=batch["xyz"].device),
+            ),
         )
 
         if self.fk_sampler is None:
@@ -237,13 +301,25 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
         for q in rollout:
             # Environment collision loss
-            input_pc = self.fk_sampler.sample(
-                q,
-                start_tool_dims,
-                start_tool_offset,
-                start_tool_quaternion,
-                self.num_robot_points,
-            )
+            # Check if we need composite sampling
+            if torch.any(start_tool_num_primitives > 1):
+                input_pc = self.fk_sampler.sample_composite(
+                    q,
+                    start_tool_dims,
+                    start_tool_offset,
+                    start_tool_quaternion,
+                    start_tool_num_primitives,
+                    self.num_robot_points,
+                )
+            else:
+                input_pc = self.fk_sampler.sample(
+                    q,
+                    start_tool_dims,
+                    start_tool_offset,
+                    start_tool_quaternion,
+                    self.num_robot_points,
+                )
+
             colli_loss = collision_loss(
                 input_pc,
                 cuboid_centers,
@@ -259,7 +335,9 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             # Self-collision loss (only if enabled)
             if self.use_self_collision:
                 # Sample point clouds per link
-                per_link_pcs = self.fk_sampler.sample_per_link(q, total_points=self.num_robot_points)
+                per_link_pcs = self.fk_sampler.sample_per_link(
+                    q, total_points=self.num_robot_points
+                )
 
                 for link_a_name, link_b_name in FRANKA_SELF_COLLISION_PAIRS:
                     if link_a_name in per_link_pcs and link_b_name in per_link_pcs:
@@ -270,10 +348,14 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
                         dists = torch.cdist(pc_a, pc_b)  # Shape: (B, K_a, K_b)
 
                         # Find the minimum distance for each batch
-                        min_dists = torch.min(dists.view(dists.shape[0], -1), dim=1)[0]  # Shape: (B,)
+                        min_dists = torch.min(dists.view(dists.shape[0], -1), dim=1)[
+                            0
+                        ]  # Shape: (B,)
 
                         # Hinge loss for self-collision
-                        self_colli_loss = torch.sum(torch.clamp(0.03 - min_dists, min=0))
+                        self_colli_loss = torch.sum(
+                            torch.clamp(0.03 - min_dists, min=0)
+                        )
                         total_self_colli_loss += self_colli_loss
 
         # Calculate total loss with optional self-collision component
@@ -313,16 +395,21 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         """
         # Rollout the trajectory
         if self.fk_sampler is None:
-            self.fk_sampler = FrankaSampler(self.device, use_cache=True, attached_primitive=attached_primitive)
+            self.fk_sampler = FrankaSampler(self.device, use_cache=True)
         if self.collision_sampler is None:
             self.collision_sampler = FrankaCollisionSampler(
                 self.device, with_base_link=False
             )
         rollout = self.rollout(batch, ROLLOUT_LENGTH, self.sample)
 
-        train_loss, goal_loss, colli_loss, self_colli_loss, position_loss, rotation_loss = (
-            self.eval_rollout(rollout, batch)
-        )
+        (
+            train_loss,
+            goal_loss,
+            colli_loss,
+            self_colli_loss,
+            position_loss,
+            rotation_loss,
+        ) = self.eval_rollout(rollout, batch)
 
         self.log("train_loss", train_loss)
         self.log("goal_loss", goal_loss)
@@ -339,32 +426,84 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         start_tool_dims: torch.Tensor,
         start_tool_offset: torch.Tensor,
         start_tool_quaternion: torch.Tensor,
+        start_tool_num_primitives: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Samples a point cloud from the surface of all the robot's links
 
         :param q torch.Tensor: Batched configuration in joint space
+        :param start_tool_dims torch.Tensor: Dimensions of attached tool primitives
+        :param start_tool_offset torch.Tensor: Offsets of attached tool primitives
+        :param start_tool_quaternion torch.Tensor: Orientations of attached tool primitives
+        :param start_tool_num_primitives torch.Tensor: Number of active tool primitives
         :rtype torch.Tensor: Batched point cloud of size [B, self.num_robot_points, 3]
         """
         assert self.fk_sampler is not None
-        return self.fk_sampler.sample(
-            q,
-            start_tool_dims,
-            start_tool_offset,
-            start_tool_quaternion,
-            self.num_robot_points,
-        )
+
+        # Handle batch dimension for tool parameters
+        if (
+            start_tool_dims.ndim == 3
+            and start_tool_dims.shape[0] == 1
+            and q.shape[0] > 1
+        ):
+            start_tool_dims = start_tool_dims.repeat(q.shape[0], 1, 1)
+        if (
+            start_tool_offset.ndim == 3
+            and start_tool_offset.shape[0] == 1
+            and q.shape[0] > 1
+        ):
+            start_tool_offset = start_tool_offset.repeat(q.shape[0], 1, 1)
+        if (
+            start_tool_quaternion.ndim == 3
+            and start_tool_quaternion.shape[0] == 1
+            and q.shape[0] > 1
+        ):
+            start_tool_quaternion = start_tool_quaternion.repeat(q.shape[0], 1, 1)
+
+        if start_tool_num_primitives is not None and torch.any(
+            start_tool_num_primitives > 1
+        ):
+            return self.fk_sampler.sample_composite(
+                q,
+                start_tool_dims,
+                start_tool_offset,
+                start_tool_quaternion,
+                start_tool_num_primitives,
+                self.num_robot_points,
+            )
+        else:
+            # For single primitive, use the original sampling method
+            # Squeeze the tool parameters to remove the primitive dimension
+            return self.fk_sampler.sample(
+                q,
+                (
+                    start_tool_dims[:, 0, :]
+                    if start_tool_dims.ndim == 3
+                    else start_tool_dims
+                ),
+                (
+                    start_tool_offset[:, 0, :]
+                    if start_tool_offset.ndim == 3
+                    else start_tool_offset
+                ),
+                (
+                    start_tool_quaternion[:, 0, :]
+                    if start_tool_quaternion.ndim == 3
+                    else start_tool_quaternion
+                ),
+                self.num_robot_points,
+            )
 
     def validation_step(  # type: ignore[override]
         self, batch: Dict[str, torch.Tensor], batch_idx: int
-    ) -> torch.Tensor:
+    ) -> Dict[str, torch.Tensor]:
         """
         This is a Pytorch Lightning function run automatically across devices
         during the validation loop
 
         :param batch Dict[str, torch.Tensor]: The batch coming from the dataloader
         :param batch_idx int: The index of the batch (not used by this function)
-        :rtype torch.Tensor: The loss values which are to be collected into summary stats
+        :rtype Dict[str, torch.Tensor]: The loss values which are to be collected into summary stats
         """
 
         # These are defined here because they need to be set on the correct devices.

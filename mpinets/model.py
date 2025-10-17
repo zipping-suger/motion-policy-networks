@@ -145,14 +145,34 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         xyz, q, target_pose = (
             batch["xyz"],
             batch["configuration"],
-            batch["target_pose"]
+            batch["target_pose"],
         )
-        
+
+        # Get composite tool parameters
+        start_tool_dims = batch.get(
+            "start_tool_dims", torch.zeros((1, 1, 3), device=xyz.device)
+        )
+        start_tool_offset = batch.get(
+            "start_tool_offset", torch.zeros((1, 1, 3), device=xyz.device)
+        )
+        start_tool_quaternion = batch.get(
+            "start_tool_quaternion",
+            torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], device=xyz.device),
+        )
+        start_tool_num_primitives = batch.get(
+            "start_tool_num_primitives", torch.ones(1, device=xyz.device)
+        )
+
         # This block is to adapt for the case where we only want to roll out a
         # single trajectory
         if q.ndim == 1:
             xyz = xyz.unsqueeze(0)
             q = q.unsqueeze(0)
+            start_tool_dims = start_tool_dims.unsqueeze(0)
+            start_tool_offset = start_tool_offset.unsqueeze(0)
+            start_tool_quaternion = start_tool_quaternion.unsqueeze(0)
+            start_tool_num_primitives = start_tool_num_primitives.unsqueeze(0)
+
         if unnormalize:
             q_unnorm = unnormalize_franka_joints(q)
             assert isinstance(q_unnorm, torch.Tensor)
@@ -170,12 +190,35 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             else:
                 trajectory.append(q)
 
-            samples = sampler(
-                q_unnorm,
-                batch["start_tool_dims"],
-                batch["start_tool_offset"],
-                batch["start_tool_quaternion"],
-            ).type_as(xyz)
+            # Use composite sampling for robot point cloud
+            # Check if any batch element has multiple primitives
+            if torch.any(start_tool_num_primitives > 1):
+                samples = sampler(
+                    q_unnorm,
+                    start_tool_dims,
+                    start_tool_offset,
+                    start_tool_quaternion,
+                    start_tool_num_primitives,
+                ).type_as(xyz)
+            else:
+                samples = sampler(
+                    q_unnorm,
+                    (
+                        start_tool_dims.squeeze(1)
+                        if start_tool_dims.shape[1] == 1
+                        else start_tool_dims
+                    ),
+                    (
+                        start_tool_offset.squeeze(1)
+                        if start_tool_offset.shape[1] == 1
+                        else start_tool_offset
+                    ),
+                    (
+                        start_tool_quaternion.squeeze(1)
+                        if start_tool_quaternion.shape[1] == 1
+                        else start_tool_quaternion
+                    ),
+                ).type_as(xyz)
             xyz[:, : samples.shape[1], :3] = samples
 
         return trajectory
@@ -196,7 +239,7 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         xyz, q, target_pose = (
             batch["xyz"],
             batch["configuration"],
-            batch["target_pose"]
+            batch["target_pose"],
         )
         y_hat = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
 
@@ -224,10 +267,24 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             start_tool_dims,
             start_tool_offset,
             start_tool_quaternion,
+            start_tool_num_primitives,
         ) = (
-            batch["start_tool_dims"],
-            batch["start_tool_offset"],
-            batch["start_tool_quaternion"],
+            batch.get(
+                "start_tool_dims", torch.zeros((xyz.shape[0], 1, 3), device=xyz.device)
+            ),
+            batch.get(
+                "start_tool_offset",
+                torch.zeros((xyz.shape[0], 1, 3), device=xyz.device),
+            ),
+            batch.get(
+                "start_tool_quaternion",
+                torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], device=xyz.device).repeat(
+                    xyz.shape[0], 1, 1
+                ),
+            ),
+            batch.get(
+                "start_tool_num_primitives", torch.ones(xyz.shape[0], device=xyz.device)
+            ),
         )
 
         collision_loss, point_match_loss = self.loss_fun(
@@ -242,6 +299,7 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             start_tool_dims,
             start_tool_offset,
             start_tool_quaternion,
+            start_tool_num_primitives,
             supervision,
         )
 
@@ -260,31 +318,84 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         start_tool_dims: torch.Tensor,
         start_tool_offset: torch.Tensor,
         start_tool_quaternion: torch.Tensor,
+        start_tool_num_primitives: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Samples a point cloud from the surface of all the robot's links
 
         :param q torch.Tensor: Batched configuration in joint space
+        :param start_tool_dims torch.Tensor: Dimensions of attached tool primitives
+        :param start_tool_offset torch.Tensor: Offsets of attached tool primitives
+        :param start_tool_quaternion torch.Tensor: Orientations of attached tool primitives
+        :param start_tool_num_primitives torch.Tensor: Number of active tool primitives
         :rtype torch.Tensor: Batched point cloud of size [B, self.num_robot_points, 3]
         """
         assert self.fk_sampler is not None
-        return self.fk_sampler.sample(
-            q,
-            start_tool_dims,
-            start_tool_offset,
-            start_tool_quaternion,
-            self.num_robot_points)
+
+        # Handle batch dimension for tool parameters
+        if (
+            start_tool_dims.ndim == 3
+            and start_tool_dims.shape[0] == 1
+            and q.shape[0] > 1
+        ):
+            start_tool_dims = start_tool_dims.repeat(q.shape[0], 1, 1)
+        if (
+            start_tool_offset.ndim == 3
+            and start_tool_offset.shape[0] == 1
+            and q.shape[0] > 1
+        ):
+            start_tool_offset = start_tool_offset.repeat(q.shape[0], 1, 1)
+        if (
+            start_tool_quaternion.ndim == 3
+            and start_tool_quaternion.shape[0] == 1
+            and q.shape[0] > 1
+        ):
+            start_tool_quaternion = start_tool_quaternion.repeat(q.shape[0], 1, 1)
+
+        if start_tool_num_primitives is not None and torch.any(
+            start_tool_num_primitives > 1
+        ):
+            return self.fk_sampler.sample_composite(
+                q,
+                start_tool_dims,
+                start_tool_offset,
+                start_tool_quaternion,
+                start_tool_num_primitives,
+                self.num_robot_points,
+            )
+        else:
+            # For single primitive, use the original sampling method
+            # Squeeze the tool parameters to remove the primitive dimension
+            return self.fk_sampler.sample(
+                q,
+                (
+                    start_tool_dims[:, 0, :]
+                    if start_tool_dims.ndim == 3
+                    else start_tool_dims
+                ),
+                (
+                    start_tool_offset[:, 0, :]
+                    if start_tool_offset.ndim == 3
+                    else start_tool_offset
+                ),
+                (
+                    start_tool_quaternion[:, 0, :]
+                    if start_tool_quaternion.ndim == 3
+                    else start_tool_quaternion
+                ),
+                self.num_robot_points,
+            )
 
     def validation_step(  # type: ignore[override]
         self, batch: Dict[str, torch.Tensor], batch_idx: int
-    ) -> torch.Tensor:
+    ) -> Dict[str, torch.Tensor]:
         """
         This is a Pytorch Lightning function run automatically across devices
         during the validation loop
 
         :param batch Dict[str, torch.Tensor]: The batch coming from the dataloader
         :param batch_idx int: The index of the batch (not used by this function)
-        :rtype torch.Tensor: The loss values which are to be collected into summary stats
+        :rtype Dict[str, torch.Tensor]: The loss values which are to be collected into summary stats
         """
 
         # These are defined here because they need to be set on the correct devices.
@@ -298,6 +409,8 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         rollout = self.rollout(batch, 69, self.sample, unnormalize=True)
 
         assert self.fk_sampler is not None  # Necessary for mypy to type properly
+
+        # Use standard end effector calculation (tool doesn't affect end effector frame)
         eff = self.fk_sampler.end_effector_pose(rollout[-1])
         position_error = torch.linalg.vector_norm(
             eff[:, :3, -1] - batch["target_position"], dim=1
@@ -426,11 +539,9 @@ class MPiNetsPointNet(pl.LightningModule):
             nn.Linear(512, 2048),
             nn.GroupNorm(16, 2048),
             nn.LeakyReLU(inplace=True),
-
             nn.Linear(2048, 1024),
             nn.GroupNorm(16, 1024),
             nn.LeakyReLU(inplace=True),
-
             nn.Linear(1024, 1024),
         )
 

@@ -59,7 +59,7 @@ class TaskDataset(Dataset):
         self.fk_sampler = FrankaSampler("cpu", use_cache=True)
         with h5py.File(str(self._database), "r") as f:
             self._length = f['target_poses'].shape[0]
-        
+
     def __len__(self):
         """
         Necessary for Pytorch. For this dataset, the length is the total number
@@ -98,13 +98,13 @@ class TaskDataset(Dataset):
         :param configuration_tensor torch.Tensor: The input tensor. Has dim [7]
         """
         return utils.normalize_franka_joints(configuration_tensor)
-    
+
     def _construct_pointcloud(self, robot_points, obstacle_points, target_points):
         """
         Construct the point cloud with features as shown in the example.
         """
         obstacle_points = torch.as_tensor(obstacle_points[:, :3]).float()
-        
+
         xyz = torch.cat(
             (
                 torch.zeros(self.num_robot_points, 4),
@@ -113,13 +113,13 @@ class TaskDataset(Dataset):
             ),
             dim=0,
         )
-        
+
         xyz[:self.num_robot_points, :3] = robot_points.float()
         xyz[self.num_robot_points:self.num_robot_points+self.num_obstacle_points, :3] = obstacle_points
         xyz[self.num_robot_points+self.num_obstacle_points:, :3] = target_points.float()
-        
+
         return xyz
-    
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
         Required by Pytorch. Queries for data at a particular index. Note that
@@ -129,44 +129,58 @@ class TaskDataset(Dataset):
         :rtype Dict[str, torch.Tensor]: Returns a dictionary that can be assembled
             by the data loader before using in training.
         """
-        
+
         item = {}
         with h5py.File(str(self._database), "r") as f:
             # Target
             target_config = f['target_configs'][idx]              
-            target_pose = FrankaRealRobot.fk(
-                target_config
-            )
-            
+            target_pose = FrankaRealRobot.fk(target_config)
             target_pose_matrix = target_pose.matrix
-            
-            start_tool_dims = f['start_tool_dims'][idx] if 'start_tool_dims' in f.keys() else np.zeros(3)
-            start_tool_offset = f['start_tool_offset'][idx] if 'start_tool_offset' in f.keys() else np.zeros(3)
-            start_tool_quaternion = f['start_tool_quaternion'][idx] if 'start_tool_quaternion' in f.keys() else np.array([1.0, 0.0, 0.0, 0.0])  
-            
+
+            # UPDATED: Handle composite tools for start tool
+            start_tool_dims = f['start_tool_dims'][idx] if 'start_tool_dims' in f.keys() else np.zeros((1, 3))
+            start_tool_offset = f['start_tool_offset'][idx] if 'start_tool_offset' in f.keys() else np.zeros((1, 3))
+            start_tool_quaternion = f['start_tool_quaternion'][idx] if 'start_tool_quaternion' in f.keys() else np.array([[1.0, 0.0, 0.0, 0.0]])
+            start_tool_num_primitives = f['start_tool_num_primitives'][idx] if 'start_tool_num_primitives' in f.keys() else 1
+
+            # UPDATED: Handle composite tools for target tool
+            target_tool_dims = f['target_tool_dims'][idx] if 'target_tool_dims' in f.keys() else np.zeros((1, 3))
+            target_tool_offset = f['target_tool_offset'][idx] if 'target_tool_offset' in f.keys() else np.zeros((1, 3))
+            target_tool_quaternion = f['target_tool_quaternion'][idx] if 'target_tool_quaternion' in f.keys() else np.array([[1.0, 0.0, 0.0, 0.0]])
+            target_tool_num_primitives = f['target_tool_num_primitives'][idx] if 'target_tool_num_primitives' in f.keys() else 1
+
+            # Store tool information
             item["start_tool_dims"] = torch.as_tensor(start_tool_dims).float()
             item["start_tool_offset"] = torch.as_tensor(start_tool_offset).float()
             item["start_tool_quaternion"] = torch.as_tensor(start_tool_quaternion).float()
-                      
-            target_points = self.fk_sampler.sample_end_effector(
+            item["start_tool_num_primitives"] = torch.as_tensor(start_tool_num_primitives).int()
+
+            item["target_tool_dims"] = torch.as_tensor(target_tool_dims).float()
+            item["target_tool_offset"] = torch.as_tensor(target_tool_offset).float()
+            item["target_tool_quaternion"] = torch.as_tensor(target_tool_quaternion).float()
+            item["target_tool_num_primitives"] = torch.as_tensor(target_tool_num_primitives).int()
+
+            # UPDATED: Sample target points using composite tool
+            target_points = self.fk_sampler.sample_composite_end_effector(
                 torch.as_tensor(target_pose_matrix).float(),
                 torch.as_tensor(start_tool_dims).float(),
                 torch.as_tensor(start_tool_offset).float(),
                 torch.as_tensor(start_tool_quaternion).float(),
+                torch.as_tensor(start_tool_num_primitives).int(),
                 num_points=self.num_target_points,
             )
-            
+
             target_position = torch.as_tensor(target_pose_matrix[:3, 3], dtype=torch.float32)
-            
+
             # Use rotation matrix R9 as rotation representation
             target_rot_mat = torch.as_tensor(target_pose.matrix[:3, :3].flatten(), dtype=torch.float32)
             item["target_position"] = target_position
             item["target_rotation"] = target_rot_mat
             item["target_pose"] = torch.cat((target_position, target_rot_mat), dim=0).float()
             item["target_configuration"] = torch.as_tensor(target_config).float()
-            
+
             # Start configuration
-            start_config = f['start_configs'][idx]
+            start_config = f["start_configs"][idx]
             config_tensor = torch.as_tensor(start_config).float()
 
             if self.train:
@@ -179,21 +193,25 @@ class TaskDataset(Dataset):
                     torch.maximum(randomized, limits[:, 0]), limits[:, 1]
                 )
                 item["configuration"] = self.normalize(randomized)
-                robot_points = self.fk_sampler.sample(
+                # UPDATED: Sample robot points using composite tool
+                robot_points = self.fk_sampler.sample_composite(
                     randomized,
                     torch.as_tensor(start_tool_dims).float(),
                     torch.as_tensor(start_tool_offset).float(),
                     torch.as_tensor(start_tool_quaternion).float(),
-                    self.num_robot_points
+                    torch.as_tensor(start_tool_num_primitives).int(),
+                    self.num_robot_points,
                 )
             else:
                 item["configuration"] = self.normalize(config_tensor)
-                robot_points = self.fk_sampler.sample(
+                # UPDATED: Sample robot points using composite tool
+                robot_points = self.fk_sampler.sample_composite(
                     config_tensor,
                     torch.as_tensor(start_tool_dims).float(),
                     torch.as_tensor(start_tool_offset).float(),
                     torch.as_tensor(start_tool_quaternion).float(),
-                    self.num_robot_points
+                    torch.as_tensor(start_tool_num_primitives).int(),
+                    self.num_robot_points,
                 )
 
             cuboid_dims = f["cuboid_dims"][idx, ...]
@@ -271,7 +289,7 @@ class TaskDataset(Dataset):
                 cuboids + cylinders, self.num_obstacle_points
             )
             item["xyz"] = self._construct_pointcloud(robot_points, obstacle_points, target_points)
-                        
+
         return item
 
 
@@ -382,31 +400,75 @@ class PointCloudBase(Dataset):
                 f[self.trajectory_key][trajectory_idx, -1, :]
             )
 
+            # UPDATED: Handle composite tools for start tool
             start_tool_dims = (
                 f["start_tool_dims"][trajectory_idx]
                 if "start_tool_dims" in f.keys()
-                else np.zeros(3)
+                else np.zeros((1, 3))
             )
             start_tool_offset = (
                 f["start_tool_offset"][trajectory_idx]
                 if "start_tool_offset" in f.keys()
-                else np.zeros(3)
+                else np.zeros((1, 3))
             )
             start_tool_quaternion = (
                 f["start_tool_quaternion"][trajectory_idx]
                 if "start_tool_quaternion" in f.keys()
-                else np.array([1.0, 0.0, 0.0, 0.0])
+                else np.array([[1.0, 0.0, 0.0, 0.0]])
+            )
+            start_tool_num_primitives = (
+                f["start_tool_num_primitives"][trajectory_idx]
+                if "start_tool_num_primitives" in f.keys()
+                else 1
+            )
+
+            # UPDATED: Handle composite tools for target tool
+            target_tool_dims = (
+                f["target_tool_dims"][trajectory_idx]
+                if "target_tool_dims" in f.keys()
+                else np.zeros((1, 3))
+            )
+            target_tool_offset = (
+                f["target_tool_offset"][trajectory_idx]
+                if "target_tool_offset" in f.keys()
+                else np.zeros((1, 3))
+            )
+            target_tool_quaternion = (
+                f["target_tool_quaternion"][trajectory_idx]
+                if "target_tool_quaternion" in f.keys()
+                else np.array([[1.0, 0.0, 0.0, 0.0]])
+            )
+            target_tool_num_primitives = (
+                f["target_tool_num_primitives"][trajectory_idx]
+                if "target_tool_num_primitives" in f.keys()
+                else 1
             )
 
             item["start_tool_dims"] = torch.as_tensor(start_tool_dims).float()
             item["start_tool_offset"] = torch.as_tensor(start_tool_offset).float()
-            item["start_tool_quaternion"] = torch.as_tensor(start_tool_quaternion).float()
+            item["start_tool_quaternion"] = torch.as_tensor(
+                start_tool_quaternion
+            ).float()
+            item["start_tool_num_primitives"] = torch.as_tensor(
+                start_tool_num_primitives
+            ).int()
 
-            target_points = self.fk_sampler.sample_end_effector(
+            item["target_tool_dims"] = torch.as_tensor(target_tool_dims).float()
+            item["target_tool_offset"] = torch.as_tensor(target_tool_offset).float()
+            item["target_tool_quaternion"] = torch.as_tensor(
+                target_tool_quaternion
+            ).float()
+            item["target_tool_num_primitives"] = torch.as_tensor(
+                target_tool_num_primitives
+            ).int()
+
+            # UPDATED: Sample target points using composite tool
+            target_points = self.fk_sampler.sample_composite_end_effector(
                 torch.as_tensor(target_pose.matrix).float(),
                 torch.as_tensor(start_tool_dims).float(),
                 torch.as_tensor(start_tool_offset).float(),
                 torch.as_tensor(start_tool_quaternion).float(),
+                torch.as_tensor(start_tool_num_primitives).int(),
                 num_points=self.num_target_points,
             )
 
@@ -437,20 +499,25 @@ class PointCloudBase(Dataset):
                     torch.maximum(randomized, limits[:, 0]), limits[:, 1]
                 )
                 item["configuration"] = self.normalize(randomized)
-                robot_points = self.fk_sampler.sample(
+                # UPDATED: Sample robot points using composite tool
+                robot_points = self.fk_sampler.sample_composite(
                     randomized,
                     torch.as_tensor(start_tool_dims).float(),
                     torch.as_tensor(start_tool_offset).float(),
-                    torch.as_tensor(start_tool_quaternion).float(), 
-                    self.num_robot_points)
+                    torch.as_tensor(start_tool_quaternion).float(),
+                    torch.as_tensor(start_tool_num_primitives).int(),
+                    self.num_robot_points,
+                )
             else:
                 item["configuration"] = self.normalize(config_tensor)
-                robot_points = self.fk_sampler.sample(
+                # UPDATED: Sample robot points using composite tool
+                robot_points = self.fk_sampler.sample_composite(
                     config_tensor,
                     torch.as_tensor(start_tool_dims).float(),
                     torch.as_tensor(start_tool_offset).float(),
-                    torch.as_tensor(start_tool_quaternion).float(), 
-                    self.num_robot_points
+                    torch.as_tensor(start_tool_quaternion).float(),
+                    torch.as_tensor(start_tool_num_primitives).int(),
+                    self.num_robot_points,
                 )
 
             cuboid_dims = f["cuboid_dims"][trajectory_idx, ...]

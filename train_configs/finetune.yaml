@@ -5,7 +5,7 @@ training_model_parameters:
     collision_loss_weight: 10
 
 data_module_parameters:
-  data_dir: /data/tabletop_tools_50k
+  data_dir: /data/tabletop_tools_complex_65k
   trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
@@ -19,7 +19,7 @@ checkpoint_interval: 10
 validation_interval: 10
 gpus: 1 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/pretrain_finetune_with_diverse_tools_tabletop_tools_50k
+save_checkpoint_dir: /workspace/pretrain_finetune_with_tabletop_tools_complex_65k
 max_epochs: 50
-experiment_name: pretrain_finetune_with_diverse_tools_tabletop_tools_50k
-description: "Pretrain and finetune on tabletop_tools_50k dataset with diverse tools"
+experiment_name: pretrain_finetune_with_tabletop_tools_complex_65k
+description: "Pretrain and finetune on tabletop_tools_complex_65k dataset with diverse tools"

@@ -5,7 +5,7 @@ training_model_parameters:
     collision_loss_weight: 5
 
 data_module_parameters:
-  data_dir: /data/tabletop_tools_50k
+  data_dir: /data/tabletop_tools_complex_65k
   trajectory_key: 'global_solutions' # Could also use 'global_solutions' for the global expert
   num_obstacle_points: 4096
   num_target_points: 128
@@ -18,6 +18,6 @@ checkpoint_interval: 10
 validation_interval: 3000
 gpus: 1 # If > 1, will use DDP for training.
 batch_size: 16
-save_checkpoint_dir: /workspace/pretrain_tabletop_tools_50k_v2
-experiment_name: pretrain_tabletop_tools_50k_v2
-description: "pretrain on tabletop_tools_50k dataset"
+save_checkpoint_dir: /workspace/pretrain_tabletop_tools_complex_65k
+experiment_name: pretrain_tabletop_tools_complex_65k
+description: "pretrain on tabletop_tools_complex_65k dataset"
