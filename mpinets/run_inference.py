@@ -33,26 +33,146 @@ NUM_TARGET_POINTS = 128
 MAX_ROLLOUT_LENGTH = 150
 
 
+def get_tool_parameters(problem, device="cuda:0"):
+    """
+    Extract tool parameters for either single primitive or composite tools
+    Returns tensors for compatibility with sampling functions
+    """
+    if problem.tool is None:
+        # No tool
+        return {
+            "is_composite": False,
+            "tool_dims": [0.0, 0.0, 0.0],
+            "tool_offsets": [0.0, 0.0, 0.0],
+            "tool_quats": [1.0, 0.0, 0.0, 0.0],
+            "tool_num_primitives": 0,
+        }
+
+    primitives = problem.tool.primitives
+    if len(primitives) == 1:
+        # Single primitive tool
+        primitive = primitives[0]
+        return {
+            "is_composite": False,
+            "tool_dims": primitive["dims"],
+            "tool_offsets": primitive["offset"],
+            "tool_quats": primitive["offset_quaternion"],
+            "tool_num_primitives": 1,
+        }
+    else:
+        # Composite tool with multiple primitives
+        tool_dims = []
+        tool_offsets = []
+        tool_quats = []
+
+        for primitive in primitives:
+            tool_dims.append(primitive["dims"])
+            tool_offsets.append(primitive["offset"])
+            tool_quats.append(primitive["offset_quaternion"])
+
+        return {
+            "is_composite": True,
+            "tool_dims": tool_dims,
+            "tool_offsets": tool_offsets,
+            "tool_quats": tool_quats,
+            "tool_num_primitives": len(primitives),
+        }
+
+
+def sample_robot_points(gpu_fk_sampler, config, tool_params, num_points):
+    """Sample robot points with appropriate method based on tool type"""
+    if tool_params["is_composite"] and tool_params["tool_num_primitives"] > 0:
+        # Convert to tensors
+        device = config.device
+        dtype = config.dtype
+
+        tool_dims_tensor = torch.tensor(
+            tool_params["tool_dims"], dtype=dtype, device=device
+        )
+        tool_offsets_tensor = torch.tensor(
+            tool_params["tool_offsets"], dtype=dtype, device=device
+        )
+        tool_quats_tensor = torch.tensor(
+            tool_params["tool_quats"], dtype=dtype, device=device
+        )
+        tool_num_primitives_tensor = torch.tensor(
+            tool_params["tool_num_primitives"], dtype=torch.long, device=device
+        )
+
+        return gpu_fk_sampler.sample_composite(
+            config,
+            tool_dims_tensor,
+            tool_offsets_tensor,
+            tool_quats_tensor,
+            tool_num_primitives_tensor,
+            num_points,
+        )
+    else:
+        return gpu_fk_sampler.sample(
+            config,
+            tool_params["tool_dims"],
+            tool_params["tool_offsets"],
+            tool_params["tool_quats"],
+            num_points,
+        )
+
+
+def sample_target_points(gpu_fk_sampler, pose, tool_params, num_points):
+    """Sample target points with appropriate method based on tool type"""
+    if tool_params["is_composite"] and tool_params["tool_num_primitives"] > 0:
+        # Convert to tensors
+        device = pose.device
+        dtype = pose.dtype
+
+        tool_dims_tensor = torch.tensor(
+            tool_params["tool_dims"], dtype=dtype, device=device
+        )
+        tool_offsets_tensor = torch.tensor(
+            tool_params["tool_offsets"], dtype=dtype, device=device
+        )
+        tool_quats_tensor = torch.tensor(
+            tool_params["tool_quats"], dtype=dtype, device=device
+        )
+        tool_num_primitives_tensor = torch.tensor(
+            tool_params["tool_num_primitives"], dtype=torch.long, device=device
+        )
+
+        return gpu_fk_sampler.sample_composite_end_effector(
+            pose,
+            tool_dims_tensor,
+            tool_offsets_tensor,
+            tool_quats_tensor,
+            tool_num_primitives_tensor,
+            num_points,
+        )
+    else:
+        return gpu_fk_sampler.sample_end_effector(
+            pose,
+            tool_params["tool_dims"],
+            tool_params["tool_offsets"],
+            tool_params["tool_quats"],
+            num_points,
+        )
+
+
 def make_point_cloud_from_problem(
     q0: torch.Tensor,
     target: SE3,
     obstacle_points: np.ndarray,
     fk_sampler: FrankaSampler,
-    tool_dim: List[float],
-    tool_offset: List[float],
-    tool_quat: List[float],
+    tool_params: dict,
 ) -> torch.Tensor:
-    robot_points = fk_sampler.sample(
-        q0, tool_dim, tool_offset, tool_quat, NUM_ROBOT_POINTS
-    )
+    robot_points = sample_robot_points(
+        fk_sampler, q0, tool_params, NUM_ROBOT_POINTS
+    ).squeeze(0)
 
-    target_points = fk_sampler.sample_end_effector(
+    target_points = sample_target_points(
+        fk_sampler,
         torch.as_tensor(target.matrix).type_as(robot_points).unsqueeze(0),
-        tool_dim,
-        tool_offset,
-        tool_quat,
-        num_points=NUM_TARGET_POINTS,
-    )
+        tool_params,
+        NUM_TARGET_POINTS,
+    ).squeeze(0)
+
     xyz = torch.cat(
         (
             torch.zeros(NUM_ROBOT_POINTS, 4),
@@ -81,9 +201,7 @@ def make_point_cloud_from_primitives(
     target: SE3,
     obstacles: List[Union[Cuboid, Cylinder]],
     fk_sampler: FrankaSampler,
-    tool_dim: List[float],
-    tool_offset: List[float],
-    tool_quat: List[float],
+    tool_params: dict,
 ) -> torch.Tensor:
     """
     Creates the pointcloud of the scene, including the target and the robot. When performing
@@ -93,21 +211,22 @@ def make_point_cloud_from_primitives(
     :param target SE3: The target pose in the `right_gripper` frame
     :param obstacles List[Union[Cuboid, Cylinder]]: The obstacles in the scene
     :param fk_sampler FrankaSampler: A sampler that produces points on the robot's surface
+    :param tool_params dict: Tool parameters from get_tool_parameters
     :rtype torch.Tensor: The pointcloud (dimensions
                          [1 x NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS + NUM_TARGET_POINTS x 4])
     """
     obstacle_points = construct_mixed_point_cloud(obstacles, NUM_OBSTACLE_POINTS)
-    robot_points = fk_sampler.sample(
-        q0, tool_dim, tool_offset, tool_quat, NUM_ROBOT_POINTS
-    )
+    robot_points = sample_robot_points(
+        fk_sampler, q0, tool_params, NUM_ROBOT_POINTS
+    ).squeeze(0)
 
-    target_points = fk_sampler.sample_end_effector(
+    target_points = sample_target_points(
+        fk_sampler,
         torch.as_tensor(target.matrix).type_as(robot_points).unsqueeze(0),
-        tool_dim,
-        tool_offset,
-        tool_quat,
-        num_points=NUM_TARGET_POINTS,
-    )
+        tool_params,
+        NUM_TARGET_POINTS,
+    ).squeeze(0)
+
     xyz = torch.cat(
         (
             torch.zeros(NUM_ROBOT_POINTS, 4),
@@ -134,9 +253,7 @@ def rollout_until_success(
     target: SE3,
     point_cloud: torch.Tensor,
     fk_sampler: FrankaSampler,
-    tool_dim: List[float],
-    tool_offset: List[float],
-    tool_quat: List[float],
+    tool_params: dict,
 ) -> np.ndarray:
     """
     Rolls out the policy until the success criteria are met. The criteria are that the
@@ -151,6 +268,7 @@ def rollout_until_success(
                                      and consist of the constituent points stacked in
                                      this order (robot, obstacle, target).
     :param fk_sampler FrankaSampler: A sampler that produces points on the robot's surface
+    :param tool_params dict: Tool parameters from get_tool_parameters
     :rtype np.ndarray: The trajectory
     """
     q = torch.as_tensor(q0).unsqueeze(0).float().cuda()
@@ -160,22 +278,29 @@ def rollout_until_success(
     trajectory = [q]
     q_norm = normalize_franka_joints(q)
     assert isinstance(q_norm, torch.Tensor)
-    
+
     # Construct the target pose input for the model
     target_position = torch.as_tensor(target.matrix[:3, 3], dtype=torch.float32)
     # Use rotation matrix R9 as rotation representation
-    target_rot_mat = torch.as_tensor(target.matrix[:3, :3].flatten(), dtype=torch.float32)
-    target_pose_input = torch.cat((target_position, target_rot_mat), dim=0).float().unsqueeze(0).to(q.device)
-    
+    target_rot_mat = torch.as_tensor(
+        target.matrix[:3, :3].flatten(), dtype=torch.float32
+    )
+    target_pose_input = (
+        torch.cat((target_position, target_rot_mat), dim=0)
+        .float()
+        .unsqueeze(0)
+        .to(q.device)
+    )
+
     success = False
 
     def sampler(config):
-        return fk_sampler.sample(
-            config, tool_dim, tool_offset, tool_quat, NUM_ROBOT_POINTS
-        )
+        return sample_robot_points(fk_sampler, config, tool_params, NUM_ROBOT_POINTS)
 
     for i in range(MAX_ROLLOUT_LENGTH):
-        q_norm = torch.clamp(q_norm + mdl(point_cloud, q_norm, target_pose_input), min=-1, max=1)
+        q_norm = torch.clamp(
+            q_norm + mdl(point_cloud, q_norm, target_pose_input), min=-1, max=1
+        )
         qt = unnormalize_franka_joints(q_norm)
         assert isinstance(qt, torch.Tensor)
         trajectory.append(qt)
@@ -191,8 +316,8 @@ def rollout_until_success(
             < 15
         ):
             break
-        samples = sampler(qt).type_as(point_cloud)
-        point_cloud[:, : samples.shape[1], :3] = samples
+        samples = sampler(qt).type_as(point_cloud).squeeze(0)
+        point_cloud[:, : samples.shape[0], :3] = samples
 
     return np.asarray([t.squeeze().detach().cpu().numpy() for t in trajectory])
 
@@ -275,23 +400,23 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
         for problem_type, problem_set in scene_sets.items():
             eval.create_new_group(f"{scene_type}, {problem_type}")
             for problem in tqdm(problem_set, leave=False):
-                if problem.tool:
-                    tool_dim = problem.tool.dims
-                    tool_offset = problem.tool.offset
-                    tool_quat = problem.tool.offset_quaternion
-                else:
-                    tool_dim = [0.0, 0.0, 0.0]
-                    tool_offset = [0.0, 0.0, 0.0]
-                    tool_quat = [1.0, 0.0, 0.0, 0.0]
+                tool_params = get_tool_parameters(problem)
+
+                if tool_params["tool_num_primitives"] > 0:
+                    if tool_params["is_composite"]:
+                        print(
+                            f"Using composite tool with {tool_params['tool_num_primitives']} primitives"
+                        )
+                    else:
+                        print(f"Using single primitive tool")
+
                 if problem.obstacle_point_cloud is None:
                     point_cloud = make_point_cloud_from_primitives(
                         torch.as_tensor(problem.q0).unsqueeze(0),
                         problem.target,
                         problem.obstacles,
                         cpu_fk_sampler,
-                        tool_dim,
-                        tool_offset,
-                        tool_quat,
+                        tool_params,
                     )
                 else:
                     assert len(problem.obstacles) > 0
@@ -300,9 +425,7 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
                         problem.target,
                         problem.obstacle_point_cloud,
                         cpu_fk_sampler,
-                        tool_dim,
-                        tool_offset,
-                        tool_quat,
+                        tool_params,
                     )
                 start_time = time.time()
                 trajectory = rollout_until_success(
@@ -311,9 +434,7 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
                     problem.target,
                     point_cloud.unsqueeze(0).cuda(),
                     gpu_fk_sampler,
-                    tool_dim,
-                    tool_offset,
-                    tool_quat,
+                    tool_params,
                 )
                 eval.evaluate_trajectory(
                     trajectory,
@@ -365,14 +486,16 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
     for scene_type, scene_sets in problems.items():
         for problem_type, problem_set in scene_sets.items():
             for problem in tqdm(problem_set, leave=False):
-                if problem.tool:
-                    tool_dim = problem.tool.dims
-                    tool_offset = problem.tool.offset
-                    tool_quat = problem.tool.offset_quaternion
-                else:
-                    tool_dim = [0.0, 0.0, 0.0]
-                    tool_offset = [0.0, 0.0, 0.0]
-                    tool_quat = [1.0, 0.0, 0.0, 0.0]
+                tool_params = get_tool_parameters(problem)
+
+                if tool_params["tool_num_primitives"] > 0:
+                    if tool_params["is_composite"]:
+                        print(
+                            f"Using composite tool with {tool_params['tool_num_primitives']} primitives"
+                        )
+                    else:
+                        print(f"Using single primitive tool")
+
                 eval.create_new_group(f"{scene_type}, {problem_type}")
                 if problem.obstacle_point_cloud is None:
                     point_cloud = make_point_cloud_from_primitives(
@@ -380,9 +503,7 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
                         problem.target,
                         problem.obstacles,
                         cpu_fk_sampler,
-                        tool_dim,
-                        tool_offset,
-                        tool_quat,
+                        tool_params,
                     )
                 else:
                     point_cloud = make_point_cloud_from_problem(
@@ -390,9 +511,7 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
                         problem.target,
                         problem.obstacle_point_cloud,
                         cpu_fk_sampler,
-                        tool_dim,
-                        tool_offset,
-                        tool_quat,
+                        tool_params,
                     )
                 start_time = time.time()
                 trajectory = rollout_until_success(
@@ -401,9 +520,7 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
                     problem.target,
                     point_cloud.unsqueeze(0).cuda(),
                     gpu_fk_sampler,
-                    tool_dim,
-                    tool_offset,
-                    tool_quat,
+                    tool_params,
                 )
                 if problem.obstacles is not None:
                     eval.evaluate_trajectory(
@@ -474,7 +591,15 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "environment_type",
-        choices=["tabletop", "cubby", "merged-cubby", "dresser", "cabinet", "pillar", "all"],
+        choices=[
+            "tabletop",
+            "cubby",
+            "merged-cubby",
+            "dresser",
+            "cabinet",
+            "pillar",
+            "all",
+        ],
         help="The environment class",
     )
     parser.add_argument(
@@ -509,8 +634,9 @@ if __name__ == "__main__":
     # HACK: The pickle file was created with a different module structure
     # This remaps the old module path to the new one so pickle can find the classes
     from mpinets import mpinets_types
-    sys.modules['data_pipeline.environments.base_environment'] = mpinets_types
-    sys.modules['mpinets.data_pipeline.environments.base_environment'] = mpinets_types
+
+    sys.modules["data_pipeline.environments.base_environment"] = mpinets_types
+    sys.modules["mpinets.data_pipeline.environments.base_environment"] = mpinets_types
 
     with open(args.problems, "rb") as f:
         problems = pickle.load(f)
@@ -530,6 +656,8 @@ if __name__ == "__main__":
         if args.num_visualize is not None:
             for env in problems:
                 for prob_type in problems[env]:
-                    problems[env][prob_type] = problems[env][prob_type][:args.num_visualize]
+                    problems[env][prob_type] = problems[env][prob_type][
+                        : args.num_visualize
+                    ]
         time.sleep(10)
         visualize_results(args.mdl_path, problems)

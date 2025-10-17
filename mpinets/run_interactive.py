@@ -144,22 +144,22 @@ def update_meshcat_point_cloud(viz, point_cloud):
     """
     # Create color array: blue for robot, green for obstacles, red for target
     point_cloud_colors = np.zeros((3, point_cloud.shape[0]))
-    
+
     # Robot points (blue)
     point_cloud_colors[2, :NUM_ROBOT_POINTS] = 1  # Blue channel
     point_cloud_colors[0, :NUM_ROBOT_POINTS] = 0.2  # Slight red tint
-    
+
     # Obstacle points (green)
     mid_start = NUM_ROBOT_POINTS
     mid_end = mid_start + NUM_OBSTACLE_POINTS
     point_cloud_colors[1, mid_start:mid_end] = 1  # Green for obstacles
-    
+
     # Target points (red)
     point_cloud_colors[0, mid_end:] = 1  # Red for target
-    
+
     # Convert all points to numpy (detach first to remove gradients)
     point_cloud_positions = point_cloud[:, :3].detach().cpu().numpy().T
-    
+
     viz["point_cloud"].set_object(
         meshcat.geometry.PointCloud(
             position=point_cloud_positions,
@@ -175,13 +175,136 @@ def setup_robot_meshcat_visualizer(viz, urdf_path):
     """
     urdf = urchin.URDF.load(urdf_path)
     # Preload the robot meshes in meshcat at a neutral position
-    for idx, (mesh, transform) in enumerate(urdf.visual_trimesh_fk(np.zeros(8)).items()):
+    for idx, (mesh, transform) in enumerate(
+        urdf.visual_trimesh_fk(np.zeros(8)).items()
+    ):
         viz[f"robot/{idx}"].set_object(
             g.TriangularMeshGeometry(mesh.vertices, mesh.faces),
             g.MeshLambertMaterial(color=0xEEDD22, wireframe=False),
         )
         viz[f"robot/{idx}"].set_transform(transform)
     return urdf
+
+
+def get_tool_parameters(problem):
+    """
+    Extract tool parameters for either single primitive or composite tools
+    """
+    if problem.tool is None:
+        # No tool
+        return {
+            "is_composite": False,
+            "tool_dims": [0.0, 0.0, 0.0],
+            "tool_offsets": [0.0, 0.0, 0.0],
+            "tool_quats": [1.0, 0.0, 0.0, 0.0],
+            "tool_num_primitives": 0,
+        }
+
+    primitives = problem.tool.primitives
+    if len(primitives) == 1:
+        # Single primitive tool
+        primitive = primitives[0]
+        return {
+            "is_composite": False,
+            "tool_dims": primitive["dims"],
+            "tool_offsets": primitive["offset"],
+            "tool_quats": primitive["offset_quaternion"],
+            "tool_num_primitives": 1,
+        }
+    else:
+        # Composite tool with multiple primitives
+        tool_dims = []
+        tool_offsets = []
+        tool_quats = []
+
+        for primitive in primitives:
+            tool_dims.append(primitive["dims"])
+            tool_offsets.append(primitive["offset"])
+            tool_quats.append(primitive["offset_quaternion"])
+
+        return {
+            "is_composite": True,
+            "tool_dims": tool_dims,
+            "tool_offsets": tool_offsets,
+            "tool_quats": tool_quats,
+            "tool_num_primitives": len(primitives),
+        }
+
+
+def sample_robot_points(gpu_fk_sampler, config, tool_params, num_points):
+    """Sample robot points with appropriate method based on tool type"""
+    if tool_params["is_composite"] and tool_params["tool_num_primitives"] > 0:
+        # Convert to tensors
+        device = config.device
+        dtype = config.dtype
+
+        tool_dims_tensor = torch.tensor(
+            tool_params["tool_dims"], dtype=dtype, device=device
+        )
+        tool_offsets_tensor = torch.tensor(
+            tool_params["tool_offsets"], dtype=dtype, device=device
+        )
+        tool_quats_tensor = torch.tensor(
+            tool_params["tool_quats"], dtype=dtype, device=device
+        )
+        tool_num_primitives_tensor = torch.tensor(
+            tool_params["tool_num_primitives"], dtype=torch.long, device=device
+        )
+
+        return gpu_fk_sampler.sample_composite(
+            config,
+            tool_dims_tensor,
+            tool_offsets_tensor,
+            tool_quats_tensor,
+            tool_num_primitives_tensor,
+            num_points,
+        ).squeeze(0)
+    else:
+        return gpu_fk_sampler.sample(
+            config,
+            tool_params["tool_dims"],
+            tool_params["tool_offsets"],
+            tool_params["tool_quats"],
+            num_points,
+        ).squeeze(0)
+
+
+def sample_target_points(gpu_fk_sampler, pose, tool_params, num_points):
+    """Sample target points with appropriate method based on tool type"""
+    if tool_params["is_composite"] and tool_params["tool_num_primitives"] > 0:
+        # Convert to tensors
+        device = pose.device
+        dtype = pose.dtype
+
+        tool_dims_tensor = torch.tensor(
+            tool_params["tool_dims"], dtype=dtype, device=device
+        )
+        tool_offsets_tensor = torch.tensor(
+            tool_params["tool_offsets"], dtype=dtype, device=device
+        )
+        tool_quats_tensor = torch.tensor(
+            tool_params["tool_quats"], dtype=dtype, device=device
+        )
+        tool_num_primitives_tensor = torch.tensor(
+            tool_params["tool_num_primitives"], dtype=torch.long, device=device
+        )
+
+        return gpu_fk_sampler.sample_composite_end_effector(
+            pose,
+            tool_dims_tensor,
+            tool_offsets_tensor,
+            tool_quats_tensor,
+            tool_num_primitives_tensor,
+            num_points,
+        ).squeeze(0)
+    else:
+        return gpu_fk_sampler.sample_end_effector(
+            pose,
+            tool_params["tool_dims"],
+            tool_params["tool_offsets"],
+            tool_params["tool_quats"],
+            num_points,
+        ).squeeze(0)
 
 
 if __name__ == "__main__":
@@ -252,8 +375,9 @@ if __name__ == "__main__":
     # HACK: The pickle file was created with a different module structure
     # This remaps the old module path to the new one so pickle can find the classes
     from mpinets import mpinets_types
-    sys.modules['data_pipeline.environments.base_environment'] = mpinets_types
-    sys.modules['mpinets.data_pipeline.environments.base_environment'] = mpinets_types
+
+    sys.modules["data_pipeline.environments.base_environment"] = mpinets_types
+    sys.modules["mpinets.data_pipeline.environments.base_environment"] = mpinets_types
 
     # Load problems from pickle file
     with open(args.problems, "rb") as f:
@@ -289,16 +413,18 @@ if __name__ == "__main__":
         f"(Env: {env_type_arg}, Problem Type: {problem_type_arg}) ======="
     )
 
-    # Get tool parameters from the problem, or use defaults
-    if problem.tool:
-        tool_dim = problem.tool.dims
-        tool_offset = problem.tool.offset
-        tool_quat = problem.tool.offset_quaternion
-        print(f"Using tool with dims: {tool_dim}")
+    # Get tool parameters from the problem
+    tool_params = get_tool_parameters(problem)
+
+    if tool_params["tool_num_primitives"] > 0:
+        if tool_params["is_composite"]:
+            print(
+                f"Using composite tool with {tool_params['tool_num_primitives']} primitives"
+            )
+        else:
+            print(f"Using single primitive tool with dims: {tool_params['tool_dims']}")
     else:
-        tool_dim = [0.0, 0.0, 0.0]
-        tool_offset = [0.0, 0.0, 0.0]
-        tool_quat = [1.0, 0.0, 0.0, 0.0]  # w, x, y, z for identity
+        print("No tool attached")
 
     # Precompute obstacle points once based on the chosen method
     if args.use_depth:
@@ -374,24 +500,20 @@ if __name__ == "__main__":
     q0_tensor = torch.tensor(
         problem.q0, dtype=torch.float32, device="cuda:0"
     ).unsqueeze(0)
-    initial_robot_points = gpu_fk_sampler.sample(
-        q0_tensor,
-        tool_dim,
-        tool_offset,
-        tool_quat,
-        NUM_ROBOT_POINTS,
-    ).squeeze(0)
+
+    # Use appropriate sampling method based on tool type
+    initial_robot_points = sample_robot_points(
+        gpu_fk_sampler, q0_tensor, tool_params, NUM_ROBOT_POINTS
+    )
 
     target_pose_tensor = torch.tensor(
         target_pose.matrix, dtype=torch.float32, device="cuda:0"
     ).unsqueeze(0)
-    target_points = gpu_fk_sampler.sample_end_effector(
-        target_pose_tensor,
-        tool_dim,
-        tool_offset,
-        tool_quat,
-        NUM_TARGET_POINTS,
-    ).squeeze(0)
+
+    # Use appropriate sampling method for target points based on tool type
+    target_points = sample_target_points(
+        gpu_fk_sampler, target_pose_tensor, tool_params, NUM_TARGET_POINTS
+    )
 
     # Create the full point cloud for visualization
     initial_point_cloud = torch.cat(
@@ -406,9 +528,9 @@ if __name__ == "__main__":
     initial_point_cloud[
         NUM_ROBOT_POINTS : NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS, :3
     ] = obstacle_points_tensor.float()
-    initial_point_cloud[
-        NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS :, :3
-    ] = target_points.float()
+    initial_point_cloud[NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS :, :3] = (
+        target_points.float()
+    )
 
     update_meshcat_point_cloud(viz, initial_point_cloud)
     current_point_cloud = initial_point_cloud.clone()
@@ -432,18 +554,16 @@ if __name__ == "__main__":
             target_pose_tensor = torch.tensor(
                 target_pose.matrix, dtype=torch.float32, device="cuda:0"
             ).unsqueeze(0)
-            target_points = gpu_fk_sampler.sample_end_effector(
-                target_pose_tensor,
-                tool_dim,
-                tool_offset,
-                tool_quat,
-                NUM_TARGET_POINTS,
-            ).squeeze(0)
+
+            # Use appropriate sampling method for target points based on tool type
+            target_points = sample_target_points(
+                gpu_fk_sampler, target_pose_tensor, tool_params, NUM_TARGET_POINTS
+            )
 
             # Update the point cloud with new target points
-            current_point_cloud[
-                NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS :, :3
-            ] = target_points.float()
+            current_point_cloud[NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS :, :3] = (
+                target_points.float()
+            )
             update_meshcat_point_cloud(viz, current_point_cloud)
 
         sim.step()
@@ -478,9 +598,10 @@ if __name__ == "__main__":
                 target_pose.matrix, dtype=torch.float32, device="cuda:0"
             ).unsqueeze(0)
 
-            target_points = gpu_fk_sampler.sample_end_effector(
-                target_pose_mat, tool_dim, tool_offset, tool_quat, NUM_TARGET_POINTS
-            ).squeeze(0)
+            # Use appropriate sampling method for target points based on tool type
+            target_points = sample_target_points(
+                gpu_fk_sampler, target_pose_mat, tool_params, NUM_TARGET_POINTS
+            )
 
             # Construct the target pose input for the model
             target_position = torch.as_tensor(
@@ -501,10 +622,10 @@ if __name__ == "__main__":
             trajectory.append(start_config.copy())
 
             for i in range(MAX_ROLLOUT_LENGTH):
-                # Sample points
-                robot_points = gpu_fk_sampler.sample(
-                    current_q, tool_dim, tool_offset, tool_quat, NUM_ROBOT_POINTS
-                ).squeeze(0)
+                # Sample points using appropriate method based on tool type
+                robot_points = sample_robot_points(
+                    gpu_fk_sampler, current_q, tool_params, NUM_ROBOT_POINTS
+                )
 
                 # Create point cloud for visualization
                 xyz_vis = torch.cat(
@@ -519,9 +640,9 @@ if __name__ == "__main__":
                 xyz_vis[
                     NUM_ROBOT_POINTS : NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS, :3
                 ] = obstacle_points_tensor.float()
-                xyz_vis[
-                    NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS :, :3
-                ] = target_points.float()
+                xyz_vis[NUM_ROBOT_POINTS + NUM_OBSTACLE_POINTS :, :3] = (
+                    target_points.float()
+                )
 
                 # Update Meshcat visualization
                 update_meshcat_point_cloud(viz, xyz_vis)
