@@ -160,7 +160,7 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], device=xyz.device),
         )
         start_tool_num_primitives = batch.get(
-            "start_tool_num_primitives", torch.ones(1, device=xyz.device)
+            "start_tool_num_primitives", torch.ones(xyz.shape[0], device=xyz.device)
         )
 
         # This block is to adapt for the case where we only want to roll out a
@@ -192,33 +192,14 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
 
             # Use composite sampling for robot point cloud
             # Check if any batch element has multiple primitives
-            if torch.any(start_tool_num_primitives > 1):
-                samples = sampler(
-                    q_unnorm,
-                    start_tool_dims,
-                    start_tool_offset,
-                    start_tool_quaternion,
-                    start_tool_num_primitives,
-                ).type_as(xyz)
-            else:
-                samples = sampler(
-                    q_unnorm,
-                    (
-                        start_tool_dims.squeeze(1)
-                        if start_tool_dims.shape[1] == 1
-                        else start_tool_dims
-                    ),
-                    (
-                        start_tool_offset.squeeze(1)
-                        if start_tool_offset.shape[1] == 1
-                        else start_tool_offset
-                    ),
-                    (
-                        start_tool_quaternion.squeeze(1)
-                        if start_tool_quaternion.shape[1] == 1
-                        else start_tool_quaternion
-                    ),
-                ).type_as(xyz)
+            samples = sampler(
+                q_unnorm,
+                start_tool_dims,
+                start_tool_offset,
+                start_tool_quaternion,
+                start_tool_num_primitives,
+            ).type_as(xyz)
+
             xyz[:, : samples.shape[1], :3] = samples
 
         return trajectory
