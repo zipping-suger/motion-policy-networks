@@ -134,38 +134,22 @@ class CollisionAndBCLossContainer:
 
         try:
             # Check if we need composite sampling
-            if torch.any(start_tool_num_primitives > 1):
-                input_pc = self.fk_sampler.sample_composite(
-                    utils.unnormalize_franka_joints(input_normalized),
-                    start_tool_dims,
-                    start_tool_offset,
-                    start_tool_quaternion,
-                    start_tool_num_primitives,
-                    num_points=None,  # Pass None since we're using fixed points
-                )
-                target_pc = self.fk_sampler.sample_composite(
-                    utils.unnormalize_franka_joints(target_normalized),
-                    start_tool_dims,
-                    start_tool_offset,
-                    start_tool_quaternion,
-                    start_tool_num_primitives,
-                    num_points=None,  # Pass None since we're using fixed points
-                )
-            else:
-                input_pc = self.fk_sampler.sample(
-                    utils.unnormalize_franka_joints(input_normalized),
-                    start_tool_dims,
-                    start_tool_offset,
-                    start_tool_quaternion,
-                    num_points=None,  # Pass None since we're using fixed points
-                )
-                target_pc = self.fk_sampler.sample(
-                    utils.unnormalize_franka_joints(target_normalized),
-                    start_tool_dims,
-                    start_tool_offset,
-                    start_tool_quaternion,
-                    num_points=None,  # Pass None since we're using fixed points
-                )
+            input_pc = self.fk_sampler.sample_composite(
+                utils.unnormalize_franka_joints(input_normalized),
+                start_tool_dims,
+                start_tool_offset,
+                start_tool_quaternion,
+                start_tool_num_primitives,
+                num_points=None,  # Pass None since we're using fixed points
+            )
+            target_pc = self.fk_sampler.sample_composite(
+                utils.unnormalize_franka_joints(target_normalized),
+                start_tool_dims,
+                start_tool_offset,
+                start_tool_quaternion,
+                start_tool_num_primitives,
+                num_points=None,  # Pass None since we're using fixed points
+            )
 
             return (
                 collision_loss(
