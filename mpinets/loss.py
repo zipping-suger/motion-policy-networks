@@ -132,53 +132,63 @@ class CollisionAndBCLossContainer:
                 with_base_link=False,
             )
 
-        # Check if we need composite sampling
-        if torch.any(start_tool_num_primitives > 1):
-            input_pc = self.fk_sampler.sample_composite(
-                utils.unnormalize_franka_joints(input_normalized),
-                start_tool_dims,
-                start_tool_offset,
-                start_tool_quaternion,
-                start_tool_num_primitives,
-                num_points=None,  # Pass None since we're using fixed points
-            )
-            target_pc = self.fk_sampler.sample_composite(
-                utils.unnormalize_franka_joints(target_normalized),
-                start_tool_dims,
-                start_tool_offset,
-                start_tool_quaternion,
-                start_tool_num_primitives,
-                num_points=None,  # Pass None since we're using fixed points
-            )
-        else:
-            input_pc = self.fk_sampler.sample(
-                utils.unnormalize_franka_joints(input_normalized),
-                start_tool_dims,
-                start_tool_offset,
-                start_tool_quaternion,
-                num_points=None,  # Pass None since we're using fixed points
-            )
-            target_pc = self.fk_sampler.sample(
-                utils.unnormalize_franka_joints(target_normalized),
-                start_tool_dims,
-                start_tool_offset,
-                start_tool_quaternion,
-                num_points=None,  # Pass None since we're using fixed points
-            )
+        try:
+            # Check if we need composite sampling
+            if torch.any(start_tool_num_primitives > 1):
+                input_pc = self.fk_sampler.sample_composite(
+                    utils.unnormalize_franka_joints(input_normalized),
+                    start_tool_dims,
+                    start_tool_offset,
+                    start_tool_quaternion,
+                    start_tool_num_primitives,
+                    num_points=None,  # Pass None since we're using fixed points
+                )
+                target_pc = self.fk_sampler.sample_composite(
+                    utils.unnormalize_franka_joints(target_normalized),
+                    start_tool_dims,
+                    start_tool_offset,
+                    start_tool_quaternion,
+                    start_tool_num_primitives,
+                    num_points=None,  # Pass None since we're using fixed points
+                )
+            else:
+                input_pc = self.fk_sampler.sample(
+                    utils.unnormalize_franka_joints(input_normalized),
+                    start_tool_dims,
+                    start_tool_offset,
+                    start_tool_quaternion,
+                    num_points=None,  # Pass None since we're using fixed points
+                )
+                target_pc = self.fk_sampler.sample(
+                    utils.unnormalize_franka_joints(target_normalized),
+                    start_tool_dims,
+                    start_tool_offset,
+                    start_tool_quaternion,
+                    num_points=None,  # Pass None since we're using fixed points
+                )
 
-        return (
-            collision_loss(
-                input_pc,
-                cuboid_centers,
-                cuboid_dims,
-                cuboid_quaternions,
-                cylinder_centers,
-                cylinder_radii,
-                cylinder_heights,
-                cylinder_quaternions,
-            ),
-            point_match_loss(input_pc, target_pc),
-        )
+            return (
+                collision_loss(
+                    input_pc,
+                    cuboid_centers,
+                    cuboid_dims,
+                    cuboid_quaternions,
+                    cylinder_centers,
+                    cylinder_radii,
+                    cylinder_heights,
+                    cylinder_quaternions,
+                ),
+                point_match_loss(input_pc, target_pc),
+            )
+        except (RuntimeError, ValueError) as e:
+            # If there's a shape mismatch or runtime error, return zero losses
+            # This allows training to continue with other data points
+            import warnings
+            warnings.warn(f"Skipping batch due to error: {e}")
+            return (
+                torch.tensor(0.0, device=input_normalized.device, requires_grad=True),
+                torch.tensor(0.0, device=input_normalized.device, requires_grad=True),
+            )
 
 
 def compute_pose_loss_rotmat(

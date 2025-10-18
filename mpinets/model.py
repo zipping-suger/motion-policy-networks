@@ -352,39 +352,14 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         ):
             start_tool_quaternion = start_tool_quaternion.repeat(q.shape[0], 1, 1)
 
-        if start_tool_num_primitives is not None and torch.any(
-            start_tool_num_primitives > 1
-        ):
-            return self.fk_sampler.sample_composite(
-                q,
-                start_tool_dims,
-                start_tool_offset,
-                start_tool_quaternion,
-                start_tool_num_primitives,
-                self.num_robot_points,
-            )
-        else:
-            # For single primitive, use the original sampling method
-            # Squeeze the tool parameters to remove the primitive dimension
-            return self.fk_sampler.sample(
-                q,
-                (
-                    start_tool_dims[:, 0, :]
-                    if start_tool_dims.ndim == 3
-                    else start_tool_dims
-                ),
-                (
-                    start_tool_offset[:, 0, :]
-                    if start_tool_offset.ndim == 3
-                    else start_tool_offset
-                ),
-                (
-                    start_tool_quaternion[:, 0, :]
-                    if start_tool_quaternion.ndim == 3
-                    else start_tool_quaternion
-                ),
-                self.num_robot_points,
-            )
+        return self.fk_sampler.sample_composite(
+            q,
+            start_tool_dims,
+            start_tool_offset,
+            start_tool_quaternion,
+            start_tool_num_primitives,
+            self.num_robot_points,
+        )
 
     def validation_step(  # type: ignore[override]
         self, batch: Dict[str, torch.Tensor], batch_idx: int

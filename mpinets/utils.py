@@ -233,6 +233,7 @@ class FrankaSampler:
         """Build transformation matrices in batch"""
         device = offsets.device
         dtype = offsets.dtype
+
         batch_size = offsets.shape[0]
 
         # Create base transformation matrices
@@ -279,137 +280,6 @@ class FrankaSampler:
         )
         fk = self.robot.link_fk_batch(cfg, use_names=True)
         return fk[frame]
-
-    def sample_end_effector(
-        self,
-        poses,
-        tool_dim,
-        tool_offset,
-        tool_quat,
-        num_points,
-        frame="right_gripper",
-    ):
-        """
-        Optimized end effector sampling with caching
-        """
-        assert poses.ndim in [2, 3]
-        assert frame == "right_gripper", "Other frames not yet suppported"
-        if poses.ndim == 2:
-            poses = poses.unsqueeze(0)
-        default_cfg = torch.zeros((1, 9), device=poses.device)
-        default_cfg[0, 7:] = self.default_prismatic_value
-        fk = self.robot.visual_geometry_fk_batch(default_cfg)
-        eff_link_names = ["panda_hand", "panda_leftfinger", "panda_rightfinger"]
-
-        values = [
-            list(fk.values())[idx]
-            for idx, l in enumerate(self.links)
-            if l.name in eff_link_names
-        ]
-        end_effector_links = [l for l in self.links if l.name in eff_link_names]
-        assert len(end_effector_links) == len(values)
-        fk_transforms = {}
-        fk_points = []
-        gripper_T_hand = torch.as_tensor(
-            FrankaRobot.EFF_T_LIST[("panda_hand", "right_gripper")].inverse.matrix
-        ).type_as(poses)
-
-        inverse_hand_transform = torch.zeros_like(values[0])
-        inverse_hand_transform[:, -1, -1] = 1
-        inverse_hand_transform[:, :3, :3] = values[0][:, :3, :3].transpose(1, 2)
-        inverse_hand_transform[:, :3, -1] = -torch.matmul(
-            inverse_hand_transform[:, :3, :3], values[0][:, :3, -1].unsqueeze(-1)
-        ).squeeze(-1)
-        right_gripper_transform = gripper_T_hand.unsqueeze(0) @ inverse_hand_transform
-
-        for idx, l in enumerate(end_effector_links):
-            fk_transforms[l.name] = values[idx]
-            pc = transform_pointcloud(
-                self.points[l.name].type_as(poses),
-                (right_gripper_transform @ fk_transforms[l.name]),
-                in_place=True,
-            )
-            fk_points.append(pc)
-        pc = torch.cat(fk_points, dim=1)
-        pc = transform_pointcloud(pc.repeat(poses.size(0), 1, 1), poses)
-
-        # Add attached primitive points if specified
-        if not torch.allclose(
-            torch.as_tensor(tool_dim), torch.zeros_like(torch.as_tensor(tool_dim))
-        ) or not torch.allclose(
-            torch.as_tensor(tool_offset), torch.zeros_like(torch.as_tensor(tool_offset))
-        ):
-            primitive_points = self._sample_attached_primitive_fast(
-                poses, tool_dim, tool_offset, tool_quat
-            )
-            pc = torch.cat([pc, primitive_points], dim=1)
-
-        if num_points is None:
-            return pc
-        return pc[:, torch.randperm(pc.shape[1])[:num_points], :]
-
-    def sample(self, config, tool_dim, tool_offset, tool_quat, num_points=None):
-        """
-        Optimized sampling with caching
-        """
-        assert bool(self.num_fixed_points is None) ^ bool(num_points is None)
-        if config.ndim == 1:
-            config = config.unsqueeze(0)
-        cfg = torch.cat(
-            (
-                config,
-                self.default_prismatic_value
-                * torch.ones((config.shape[0], 2), device=config.device),
-            ),
-            dim=1,
-        )
-        fk = self.robot.visual_geometry_fk_batch(cfg)
-        values = list(fk.values())
-        assert len(self.links) == len(values)
-        fk_transforms = {}
-        fk_points = []
-        for idx, l in enumerate(self.links):
-            if l.name == "panda_link0" and not self.with_base_link:
-                continue
-            fk_transforms[l.name] = values[idx]
-            pc = transform_pointcloud(
-                self.points[l.name]
-                .float()
-                .repeat((fk_transforms[l.name].shape[0], 1, 1)),
-                fk_transforms[l.name],
-                in_place=True,
-            )
-            fk_points.append(pc)
-        pc = torch.cat(fk_points, dim=1)
-
-        # Add attached primitive points if specified
-        if not torch.allclose(
-            torch.as_tensor(tool_dim), torch.zeros_like(torch.as_tensor(tool_dim))
-        ) or not torch.allclose(
-            torch.as_tensor(tool_offset), torch.zeros_like(torch.as_tensor(tool_offset))
-        ):
-            ee_pose = self.end_effector_pose(config, frame="right_gripper")
-
-            # Fix dimensions
-            tool_dim_fixed = tool_dim
-            tool_offset_fixed = tool_offset
-            tool_quat_fixed = tool_quat
-
-            if tool_dim_fixed.ndim == 3 and tool_dim_fixed.shape[1] == 1:
-                tool_dim_fixed = tool_dim_fixed.squeeze(1)
-            if tool_offset_fixed.ndim == 3 and tool_offset_fixed.shape[1] == 1:
-                tool_offset_fixed = tool_offset_fixed.squeeze(1)
-            if tool_quat_fixed.ndim == 3 and tool_quat_fixed.shape[1] == 1:
-                tool_quat_fixed = tool_quat_fixed.squeeze(1)
-
-            primitive_points = self._sample_attached_primitive_fast(
-                ee_pose, tool_dim_fixed, tool_offset_fixed, tool_quat_fixed
-            )
-            pc = torch.cat([pc, primitive_points], dim=1)
-
-        if num_points is None:
-            return pc
-        return pc[:, torch.randperm(pc.shape[1])[:num_points], :]
 
     def sample_composite(
         self,
@@ -472,62 +342,6 @@ class FrankaSampler:
         if num_points is None:
             return pc
         return pc[:, torch.randperm(pc.shape[1])[:num_points], :]
-
-    def _sample_attached_primitive_fast(self, ee_poses, dim, offset, offset_quat):
-        """
-        Fast batched primitive sampling with caching
-        """
-        device = ee_poses.device
-        dtype = ee_poses.dtype
-
-        if ee_poses.dim() == 3:
-            batch_size = ee_poses.shape[0]
-            single_pose = False
-        else:
-            batch_size = 1
-            single_pose = True
-            ee_poses = ee_poses.unsqueeze(0)
-
-        # Convert inputs to batched tensors
-        dim_tensor = torch.as_tensor(dim, device=device, dtype=dtype)
-        offset_tensor = torch.as_tensor(offset, device=device, dtype=dtype)
-        offset_quat_tensor = torch.as_tensor(offset_quat, device=device, dtype=dtype)
-
-        # Fix dimensions
-        if dim_tensor.ndim == 3:
-            dim_tensor = dim_tensor.squeeze(1)
-        if offset_tensor.ndim == 3:
-            offset_tensor = offset_tensor.squeeze(1)
-        if offset_quat_tensor.ndim == 3:
-            offset_quat_tensor = offset_quat_tensor.squeeze(1)
-
-        if dim_tensor.ndim == 1:
-            dim_tensor = dim_tensor.unsqueeze(0).repeat(batch_size, 1)
-        if offset_tensor.ndim == 1:
-            offset_tensor = offset_tensor.unsqueeze(0).repeat(batch_size, 1)
-        if offset_quat_tensor.ndim == 1:
-            offset_quat_tensor = offset_quat_tensor.unsqueeze(0).repeat(batch_size, 1)
-
-        # Build batch transforms
-        offset_transforms = self._build_batch_transforms(
-            offset_tensor, offset_quat_tensor
-        )
-        combined_poses = torch.bmm(ee_poses, offset_transforms)
-
-        # Sample points using cache
-        num_points = 500
-        points = self._sample_cuboid_points_fast(dim_tensor[0], num_points)
-        points_batch = points.unsqueeze(0).repeat(batch_size, 1, 1)
-
-        # Transform all points at once
-        transformed_points = transform_pointcloud(
-            points_batch, combined_poses, in_place=False
-        )
-
-        if single_pose:
-            transformed_points = transformed_points.squeeze(0)
-
-        return transformed_points
 
     def _sample_composite_attached_primitive_fast(
         self, ee_poses, dims, offsets, quats, num_primitives
