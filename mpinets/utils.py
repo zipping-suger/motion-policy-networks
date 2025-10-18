@@ -284,8 +284,21 @@ class FrankaSampler:
             torch.as_tensor(tool_offset), torch.zeros_like(torch.as_tensor(tool_offset))
         ):
             ee_pose = self.end_effector_pose(config, frame="right_gripper")
+
+            # Fix: Ensure tool parameters have correct dimensions
+            tool_dim_fixed = tool_dim
+            tool_offset_fixed = tool_offset
+            tool_quat_fixed = tool_quat
+
+            if tool_dim_fixed.ndim == 3 and tool_dim_fixed.shape[1] == 1:
+                tool_dim_fixed = tool_dim_fixed.squeeze(1)
+            if tool_offset_fixed.ndim == 3 and tool_offset_fixed.shape[1] == 1:
+                tool_offset_fixed = tool_offset_fixed.squeeze(1)
+            if tool_quat_fixed.ndim == 3 and tool_quat_fixed.shape[1] == 1:
+                tool_quat_fixed = tool_quat_fixed.squeeze(1)
+
             primitive_points = self._sample_attached_primitive(
-                ee_pose, tool_dim, tool_offset, tool_quat
+                ee_pose, tool_dim_fixed, tool_offset_fixed, tool_quat_fixed
             )
             pc = torch.cat([pc, primitive_points], dim=1)
 
@@ -464,10 +477,18 @@ class FrankaSampler:
             single_pose = True
             ee_poses = ee_poses.unsqueeze(0)
 
-        # Convert inputs to batched tensors
+        # Convert inputs to batched tensors with proper shape handling
         dim_tensor = torch.as_tensor(dim, device=device, dtype=dtype)
         offset_tensor = torch.as_tensor(offset, device=device, dtype=dtype)
         offset_quat_tensor = torch.as_tensor(offset_quat, device=device, dtype=dtype)
+
+        # Fix: Ensure proper dimensions
+        if dim_tensor.ndim == 3:
+            dim_tensor = dim_tensor.squeeze(1)  # [B, 1, 3] -> [B, 3]
+        if offset_tensor.ndim == 3:
+            offset_tensor = offset_tensor.squeeze(1)  # [B, 1, 3] -> [B, 3]
+        if offset_quat_tensor.ndim == 3:
+            offset_quat_tensor = offset_quat_tensor.squeeze(1)  # [B, 1, 4] -> [B, 4]
 
         if dim_tensor.ndim == 1:
             dim_tensor = dim_tensor.unsqueeze(0).repeat(batch_size, 1)
@@ -476,12 +497,22 @@ class FrankaSampler:
         if offset_quat_tensor.ndim == 1:
             offset_quat_tensor = offset_quat_tensor.unsqueeze(0).repeat(batch_size, 1)
 
+        # Ensure batch dimension matches
+        if dim_tensor.shape[0] != batch_size:
+            dim_tensor = dim_tensor.expand(batch_size, -1)
+        if offset_tensor.shape[0] != batch_size:
+            offset_tensor = offset_tensor.expand(batch_size, -1)
+        if offset_quat_tensor.shape[0] != batch_size:
+            offset_quat_tensor = offset_quat_tensor.expand(batch_size, -1)
+
         # --- Build offset transform ---
         offset_transform = (
             torch.eye(4, device=device, dtype=dtype)
             .unsqueeze(0)
             .repeat(batch_size, 1, 1)
         )
+
+        # Fix: This should now work with [B, 3] offset_tensor
         offset_transform[:, :3, 3] = offset_tensor
 
         # Quaternion to rotation matrix (vectorized)
