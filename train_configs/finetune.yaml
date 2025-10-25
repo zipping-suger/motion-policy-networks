@@ -17,7 +17,7 @@ training_model_parameters:
     collision_loss_weight: 10
 
 data_module_parameters:
-  data_dir: /data/cabinet_8
+  data_dir: /data/cabinet_6k
   trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
