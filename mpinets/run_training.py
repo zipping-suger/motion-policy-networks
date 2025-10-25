@@ -39,6 +39,7 @@ sys.path.insert(0, PROJECT_ROOT)
 from mpinets.data_loader import DataModule
 from mpinets.model import TrainingMotionPolicyNetwork
 from mpinets.model_opt import TrainingPolicyNetOpt
+from mpinets.her_callback import HindsightExperienceReplayCallback
 
 
 def import_training_policy_net(mode):
@@ -51,6 +52,7 @@ def import_training_policy_net(mode):
 
 
 def setup_trainer(
+    config: Dict[str, Any],  # Add config as first parameter
     gpus: int,
     test: bool,
     should_checkpoint: bool,
@@ -62,6 +64,7 @@ def setup_trainer(
     """
     Creates the Pytorch Lightning trainer object
 
+    :param config Dict[str, Any]: The configuration dictionary
     :param gpus int: The number of GPUs (if more than 1, uses DDP)
     :param test bool: Whether to use a test dataset
     :param should_checkpoint bool: Whether to save checkpoints
@@ -92,20 +95,48 @@ def setup_trainer(
         experiment_id = str(logger.experiment.id)
     else:
         experiment_id = str(uuid.uuid1())
+
+    # Add HER callback for fine-tuning
+    if (
+        not test
+        and config.get("use_her", False)
+        and config["train_mode"] in ["finetune", "finetune_tasks"]
+    ):
+        try:
+            from mpinets.her_callback import HindsightExperienceReplayCallback
+
+            her_callback = HindsightExperienceReplayCallback(
+                update_interval=config.get("her_update_interval", 5),
+                position_error_threshold=config.get("her_position_threshold", 0.08),
+                rotation_error_threshold=config.get("her_rotation_threshold", 0.3),
+                max_updates_per_epoch=config.get("her_max_updates_per_epoch", 500),
+            )
+            callbacks.append(her_callback)
+            print("Added Hindsight Experience Replay callback")
+        except ImportError as e:
+            print(f"Warning: Could not import HER callback: {e}")
+
     if should_checkpoint:
         if checkpoint_dir is not None:
             dirpath = Path(checkpoint_dir).resolve() / experiment_id
         else:
             dirpath = PROJECT_ROOT / "checkpoints" / experiment_id
         pl.utilities.rank_zero_info(f"Saving checkpoints to {dirpath}")
+
+        # Use the monitor metric from config, default to "avg_target_error"
+        monitor_metric = config.get("monitor_metric", "avg_target_error")
+        monitor_mode = config.get("monitor_mode", "min")
+
         every_n_checkpoint = ModelCheckpoint(
-            monitor="avg_target_error",  # <-- changed from "train_loss"
+            monitor=monitor_metric,
+            mode=monitor_mode,
             save_last=True,
             dirpath=dirpath,
             train_time_interval=timedelta(minutes=checkpoint_interval),
         )
         epoch_end_checkpoint = ModelCheckpoint(
-            monitor="avg_target_error",  # <-- changed from "train_loss"
+            monitor=monitor_metric,
+            mode=monitor_mode,
             save_last=True,
             dirpath=dirpath,
             save_on_train_epoch_end=True,
@@ -113,11 +144,16 @@ def setup_trainer(
         epoch_end_checkpoint.CHECKPOINT_NAME_LAST = "epoch-{epoch}-end"
         callbacks.extend([every_n_checkpoint, epoch_end_checkpoint])
 
+    # Add gradient clipping if specified
+    gradient_clip_val = config.get("gradient_clip_val", 1.0)
+    accumulate_grad_batches = config.get("accumulate_grad_batches", 1)
+
     trainer = pl.Trainer(
         enable_checkpointing=should_checkpoint,
         callbacks=callbacks,
-        max_epochs=1 if test else 500,
-        gradient_clip_val=1.0,
+        max_epochs=1 if test else config.get("max_epochs", 500),
+        gradient_clip_val=gradient_clip_val,
+        accumulate_grad_batches=accumulate_grad_batches,
         gpus=gpus,
         precision=16,
         logger=False if logger is None else logger,
@@ -188,6 +224,7 @@ def run():
     )
 
     trainer = setup_trainer(
+        config,  # Pass config as first argument
         config["gpus"],
         config["test"],
         should_checkpoint=not config["no_checkpointing"],
@@ -204,7 +241,7 @@ def run():
     )
     mode = config["train_mode"]
     TrainingPolicyNet = import_training_policy_net(mode)
-    
+
     # Initialize the model
     mdl = TrainingPolicyNet(
         **(config["shared_parameters"] or {}),

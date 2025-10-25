@@ -1,11 +1,23 @@
 train_mode: "finetune"
 
+use_her: true
+her_update_interval: 5
+her_position_threshold: 0.05
+her_rotation_threshold: 0.2
+
+# Memory-safe HER parameters
+her_max_updates_per_epoch: 50
+her_max_samples_per_update: 100
+her_max_total_updates: 1000
+her_enable_memory_optimizations: true
+her_skip_epoch_zero: true  # NEW: Skip HER at epoch 0
+
 training_model_parameters:
     goal_loss_weight: 1
     collision_loss_weight: 10
 
 data_module_parameters:
-  data_dir: /data/cabinet_30k
+  data_dir: /data/cabinet_8
   trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
@@ -16,10 +28,10 @@ shared_parameters:
 
 model_path: /workspace/mpinets_finetune_mpinets_hybrid_training_data_small_hybrid_finetuned_on_small/sp2hrle1/epoch=14-step=17040.ckpt
 checkpoint_interval: 10
-validation_interval: 10
-gpus: 6 # If > 1, will use DDP for training.
-batch_size: 48
-save_checkpoint_dir: /workspace/finetune_with_new_cabinet_data_30k_self_collision_weight_2
+validation_interval: 2
+gpus: 1
+batch_size: 32
+save_checkpoint_dir: /workspace/her_cabinet_6k
 max_epochs: 50
-experiment_name: finetune_with_new_cabinet_data_30k_self_collision_weight_2
-description: "Best model finetuned on cabinet_30k dataset with self-collision loss"
+experiment_name: her_cabinet_6k
+description: "HER finetuning on cabinet_6k dataset with memory optimizations"
