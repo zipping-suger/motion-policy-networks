@@ -25,7 +25,7 @@ NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
 
 # Global parameter: Set to True for self-feedback (simulation), False for real robot feedback
-USE_SELF_FEEDBACK = True
+USE_SELF_FEEDBACK = False
 
 # The neutral configuration
 NEUTRAL_CONFIG = np.array(
