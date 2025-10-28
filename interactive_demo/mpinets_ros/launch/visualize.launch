@@ -1,8 +1,8 @@
 <launch>
   <arg name="mdl_path" />
   <arg name="point_cloud_path" default="" />
-  <arg name="pointcloud_rate" default="1.0" />
-  <arg name="control_rate" default="10.0" />
+  <arg name="pointcloud_rate" default="30.0" />
+  <arg name="control_rate" default="50.0" />
   <arg name="use_self_feedback" default="false" />
   
   <param name="robot_description" command="$(find xacro)/xacro $(find franka_description)/robots/panda/panda.urdf.xacro hand:=true" />

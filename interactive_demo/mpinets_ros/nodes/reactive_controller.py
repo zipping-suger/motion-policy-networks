@@ -593,8 +593,28 @@ class ReactiveControllerNode:
 
     def send_joint_command(self, joint_positions: np.ndarray):
         """
-        Send joint command to the robot
+        Send joint command to the robot with adaptive duration
         """
+        with self.control_lock:
+            if self.current_joint_state is None:
+                return
+                
+            # Calculate the maximum joint position change
+            joint_deltas = np.abs(joint_positions - self.current_joint_state)
+            max_delta = np.max(joint_deltas)
+            
+            # Scale duration based on the maximum change
+            # Base duration + scaled component
+            base_duration = 0.2  # Minimum duration for very small movements
+            max_allowed_duration = 1.0  # Maximum duration for safety
+            scaling_factor = 3.0  # Adjust this to control sensitivity
+            
+            # Calculate adaptive duration
+            duration = base_duration + (max_delta * scaling_factor)
+            duration = min(max(duration, base_duration), max_allowed_duration)
+            
+            rospy.logdebug(f"Max joint delta: {max_delta:.4f}, Command duration: {duration:.3f}s")
+
         traj_msg = JointTrajectory()
         traj_msg.header.stamp = rospy.Time.now()
         traj_msg.joint_names = [
@@ -611,7 +631,7 @@ class ReactiveControllerNode:
         point.positions = joint_positions.tolist()
         point.velocities = [0.0] * 7
         point.accelerations = [0.0] * 7
-        point.time_from_start = rospy.Duration.from_sec(self.control_dt)
+        point.time_from_start = rospy.Duration.from_sec(duration)
 
         traj_msg.points.append(point)
         self.joint_command_publisher.publish(traj_msg)
