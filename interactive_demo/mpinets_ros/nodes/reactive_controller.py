@@ -25,7 +25,7 @@ NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
 
 # Global parameter: Set to True for self-feedback (simulation), False for real robot feedback
-USE_SELF_FEEDBACK = False
+USE_SELF_FEEDBACK = rospy.get_param("~use_self_feedback", False)  # Default is False
 
 # The neutral configuration
 NEUTRAL_CONFIG = np.array(
