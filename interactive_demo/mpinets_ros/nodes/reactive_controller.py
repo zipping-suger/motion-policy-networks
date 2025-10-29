@@ -28,19 +28,17 @@ NUM_TARGET_POINTS = 128
 USE_SELF_FEEDBACK = rospy.get_param("~use_self_feedback", False)  # Default is False
 
 # The neutral configuration
-NEUTRAL_CONFIG = np.array(
-    [
-        -0.01779206,
-        -0.76012354,
-        0.01978261,
-        -2.34205014,
-        0.02984053,
-        1.54119353,
-        0.75344866,
-        0.025,
-        0.025,
-    ]
-)
+NEUTRAL_CONFIG = np.array([
+    -0.01779206,
+    -0.76012354,
+    0.01978261,
+    -2.34205014,
+    0.02984053,
+    1.54119353,
+    0.75344866,
+    0.025,
+    0.025,
+])
 
 
 class ReactiveController:
@@ -203,6 +201,7 @@ class ReactiveControllerNode:
         self.is_controlling = False
         self.control_thread = None
         self.control_lock = threading.Lock()
+        self.stop_requested = False
 
         # Get the point cloud path parameter
         point_cloud_path = rospy.get_param("~point_cloud_path", "")
@@ -258,6 +257,14 @@ class ReactiveControllerNode:
             queue_size=1,
         )
 
+        # Subscribe to stop commands
+        self.stop_control_subscriber = rospy.Subscriber(
+            "/mpinets/stop_control",
+            Bool,
+            self.stop_control_callback,
+            queue_size=1,
+        )
+
         if self.use_live_pointcloud:
             # Subscribe to PRE-PROCESSED point cloud topic
             self.processed_pointcloud_subscriber = rospy.Subscriber(
@@ -278,6 +285,16 @@ class ReactiveControllerNode:
         self.controller = ReactiveController(rospy.get_param("~mdl_path"))
         rospy.loginfo("Model loaded")
         rospy.loginfo("Reactive controller ready")
+
+    def stop_control_callback(self, msg):
+        """
+        Handle stop control commands
+        """
+        if msg.data:
+            rospy.loginfo("Received stop control command")
+            with self.control_lock:
+                self.stop_requested = True
+                self.is_controlling = False
 
     def publish_joint_states(self, event=None):
         """
@@ -514,12 +531,16 @@ class ReactiveControllerNode:
 
         with self.control_lock:
             self.target_pose = target
+            self.stop_requested = False
 
             # Stop current control if running
             if self.is_controlling:
                 self.is_controlling = False
                 if self.control_thread and self.control_thread.is_alive():
-                    self.control_thread.join()
+                    rospy.loginfo("Waiting for current control thread to finish...")
+                    self.control_thread.join(timeout=2.0)
+                    if self.control_thread.is_alive():
+                        rospy.logwarn("Control thread did not finish cleanly")
 
             # Start new control thread
             self.is_controlling = True
@@ -537,6 +558,13 @@ class ReactiveControllerNode:
         while self.is_controlling and not rospy.is_shutdown():
             try:
                 with self.control_lock:
+                    # Check if stop was requested
+                    if self.stop_requested:
+                        rospy.loginfo("Stop requested, exiting control loop")
+                        self.is_controlling = False
+                        self.status_publisher.publish(Bool(data=False))
+                        break
+
                     # Check if we have all necessary data
                     if (
                         self.current_joint_state is None
@@ -607,7 +635,7 @@ class ReactiveControllerNode:
             # Base duration + scaled component
             base_duration = 0.2  # Minimum duration for very small movements
             max_allowed_duration = 1.0  # Maximum duration for safety
-            scaling_factor = 3.0  # Adjust this to control sensitivity
+            scaling_factor = 4.0  # Adjust this to control sensitivity
             
             # Calculate adaptive duration
             duration = base_duration + (max_delta * scaling_factor)

@@ -18,19 +18,17 @@ import tf2_ros
 from copy import deepcopy
 
 # The neutral configuration at which to start the node
-NEUTRAL_CONFIG = np.array(
-    [
-        -0.01779206,
-        -0.76012354,
-        0.01978261,
-        -2.34205014,
-        0.02984053,
-        1.54119353,
-        0.75344866,
-        0.025,
-        0.025,
-    ]
-)
+NEUTRAL_CONFIG = np.array([
+    -0.01779206,
+    -0.76012354,
+    0.01978261,
+    -2.34205014,
+    0.02984053,
+    1.54119353,
+    0.75344866,
+    0.025,
+    0.025,
+])
 
 # A neutral starting target (matches the end effector of the neutral start)
 NEUTRAL_TARGET_XYZ = [0.30649957127333377, 0.007287351995245575, 0.4866376674460814]
@@ -70,16 +68,16 @@ class ReactiveInterface:
         self.current_joint_state = NEUTRAL_CONFIG.tolist()
         self.is_controlling = False
 
-        # Create target marker
-        self.make_target_marker(self.target_xyz, self.target_xyzw)
-        self.server.applyChanges()
-
         # Publishers
         self.planning_problem_publisher = rospy.Publisher(
             "/mpinets/planning_problem", PlanningProblem, queue_size=1
         )
         self.joint_states_publisher = rospy.Publisher(
             "/mpinets/joint_states", JointState, queue_size=1
+        )
+        # Add stop command publisher
+        self.stop_control_publisher = rospy.Publisher(
+            "/mpinets/stop_control", Bool, queue_size=1
         )
 
         # Subscribers
@@ -89,6 +87,10 @@ class ReactiveInterface:
         self.control_status_subscriber = rospy.Subscriber(
             "/mpinets/control_status", Bool, self.control_status_callback, queue_size=1
         )
+
+        # Create target marker
+        self.make_target_marker(self.target_xyz, self.target_xyzw)
+        self.server.applyChanges()
 
         time.sleep(1)
         self.reset_franka()
@@ -352,12 +354,12 @@ class ReactiveInterface:
 
     def stop_button_callback(self, feedback):
         """
-        Stop reactive control (implement by setting a flag or publishing a stop message)
+        Stop reactive control - actually send a stop command now
         """
         if feedback.event_type == InteractiveMarkerFeedback.BUTTON_CLICK:
             rospy.loginfo("Stopping reactive control")
-            # You could implement a stop mechanism here
-            # For now, we'll just log the request
+            # Publish stop command
+            self.stop_control_publisher.publish(Bool(data=True))
 
         self.server.applyChanges()
 
