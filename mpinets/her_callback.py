@@ -12,11 +12,11 @@ class HindsightExperienceReplayCallback(pl.Callback):
     def __init__(
         self,
         update_interval: int = 5,
-        position_error_threshold: float = 0.08,
-        rotation_error_threshold: float = 0.3,
-        max_updates_per_epoch: int = 100,
-        max_samples_per_update: int = 200,
-        max_total_updates: int = 2000,
+        position_error_threshold: float = 0.05,
+        rotation_error_threshold: float = 0.2,
+        max_updates_per_epoch: int = 2000,
+        max_samples_per_update: int = 2000,
+        max_total_updates: int = 20000,
         enable_memory_optimizations: bool = True,
         skip_epoch_zero: bool = True,  # NEW: Skip epoch 0 by default
     ):

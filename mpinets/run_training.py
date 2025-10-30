@@ -107,9 +107,11 @@ def setup_trainer(
 
             her_callback = HindsightExperienceReplayCallback(
                 update_interval=config.get("her_update_interval", 5),
-                position_error_threshold=config.get("her_position_threshold", 0.08),
-                rotation_error_threshold=config.get("her_rotation_threshold", 0.3),
-                max_updates_per_epoch=config.get("her_max_updates_per_epoch", 500),
+                position_error_threshold=config.get("her_position_threshold", 0.05),
+                rotation_error_threshold=config.get("her_rotation_threshold", 0.2),
+                max_samples_per_update=config.get("her_max_samples_per_update", 2000),  # New m
+                max_updates_per_epoch=config.get("her_max_updates_per_epoch", 2000),
+                max_total_updates=config.get("her_max_total_updates", 20000),
             )
             callbacks.append(her_callback)
             print("Added Hindsight Experience Replay callback")
