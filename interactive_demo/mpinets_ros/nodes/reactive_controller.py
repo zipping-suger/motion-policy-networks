@@ -20,6 +20,15 @@ import threading
 
 import rospy
 
+# Import Ruckig for trajectory smoothing
+try:
+    import ruckig
+    from ruckig import InputParameter, OutputParameter, Result
+    RUCKIG_AVAILABLE = True
+except ImportError:
+    rospy.logwarn("Ruckig not available. Install with: pip install ruckig")
+    RUCKIG_AVAILABLE = False
+
 NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
@@ -39,6 +48,10 @@ NEUTRAL_CONFIG = np.array([
     0.025,
     0.025,
 ])
+
+# Ruckig configuration
+RUCKIG_LOOKAHEAD = 5  # Number of neural network predictions to use for smoothing
+RUCKIG_CONTROL_RATE = 100.0  # Hz - matches your neural network rate
 
 
 class ReactiveController:
@@ -165,7 +178,7 @@ class ReactiveController:
 class ReactiveControllerNode:
     def __init__(self):
         """
-        Initializes the reactive controller node
+        Initializes the reactive controller node with Ruckig smoothing
         """
         rospy.init_node("mpinets_reactive_controller")
         time.sleep(1)
@@ -174,8 +187,15 @@ class ReactiveControllerNode:
         self.base_frame = "panda_link0"
 
         # Control parameters
-        self.control_rate = rospy.get_param("~control_rate", 10.0)  # Hz
-        self.control_dt = 1.0 / self.control_rate
+        self.control_rate = rospy.get_param("~control_rate", 50.0)  # Hz
+        self.control_dt = 0.05
+
+        # Ruckig initialization
+        self.ruckig_initialized = False
+        if RUCKIG_AVAILABLE:
+            self.setup_ruckig()
+        else:
+            rospy.logwarn("Running without Ruckig smoothing - motion may be jerky")
 
         # Log feedback mode
         rospy.loginfo(
@@ -186,6 +206,8 @@ class ReactiveControllerNode:
         if USE_SELF_FEEDBACK:
             # Self-feedback mode: start with neutral config
             self.current_joint_state = NEUTRAL_CONFIG[:7].copy()  # Only arm joints
+            self.current_joint_velocity = np.zeros(7)  # Zero velocity for simulation
+            self.current_joint_acceleration = np.zeros(7)  # Zero acceleration for simulation
             self.full_joint_state = NEUTRAL_CONFIG.copy()  # Full state for publishing
             rospy.loginfo(
                 "Initialized with neutral configuration for self-feedback mode"
@@ -193,6 +215,8 @@ class ReactiveControllerNode:
         else:
             # Real robot mode: wait for real joint states
             self.current_joint_state = None
+            self.current_joint_velocity = None
+            self.current_joint_acceleration = None
             self.full_joint_state = None
             rospy.loginfo("Waiting for real joint states...")
 
@@ -202,6 +226,10 @@ class ReactiveControllerNode:
         self.control_thread = None
         self.control_lock = threading.Lock()
         self.stop_requested = False
+
+        # Waypoint buffer for Ruckig smoothing
+        self.waypoint_buffer = []
+        self.max_waypoints = RUCKIG_LOOKAHEAD
 
         # Get the point cloud path parameter
         point_cloud_path = rospy.get_param("~point_cloud_path", "")
@@ -248,6 +276,14 @@ class ReactiveControllerNode:
             self.joint_state_subscriber = rospy.Subscriber(
                 "/joint_states", JointState, self.joint_state_callback, queue_size=1
             )
+            
+            # Subscribe to franka_states for velocities and accelerations
+            self.franka_state_subscriber = rospy.Subscriber(
+                "/franka_state_controller/franka_states",
+                JointState,  # Note: This might need to be a different message type
+                self.franka_state_callback,
+                queue_size=1
+            )
 
         # Subscribe to planning problems (start/stop commands)
         self.planning_problem_subscriber = rospy.Subscriber(
@@ -286,6 +322,133 @@ class ReactiveControllerNode:
         rospy.loginfo("Model loaded")
         rospy.loginfo("Reactive controller ready")
 
+    def setup_ruckig(self):
+        """Initialize Ruckig for trajectory smoothing"""
+        try:
+            # Conservative limits for Franka Panda (adjust as needed)
+            self.ruckig_limits = {
+                'max_velocity': [2.0, 2.0, 2.0, 2.0, 2.5, 2.5, 2.5],  # rad/s
+                'max_acceleration': [3.0, 3.0, 3.0, 3.0, 5.0, 5.0, 5.0],  # rad/s²
+                'max_jerk': [10.0, 10.0, 10.0, 10.0, 15.0, 15.0, 15.0],  # rad/s³
+            }
+            
+            # Initialize Ruckig
+            self.ruckig = ruckig.Ruckig(7, 1.0/RUCKIG_CONTROL_RATE)  # 7 DoF, 50Hz
+            self.ruckig_input = InputParameter(7)
+            self.ruckig_output = OutputParameter(7)
+            
+            # Set kinematic limits
+            self.ruckig_input.max_velocity = self.ruckig_limits['max_velocity']
+            self.ruckig_input.max_acceleration = self.ruckig_limits['max_acceleration']
+            self.ruckig_input.max_jerk = self.ruckig_limits['max_jerk']
+            
+            self.ruckig_initialized = True
+            rospy.loginfo("Ruckig initialized for smooth trajectory generation")
+            
+        except Exception as e:
+            rospy.logerr(f"Failed to initialize Ruckig: {e}")
+            self.ruckig_initialized = False
+
+    def smooth_with_ruckig(self, current_q: np.ndarray, neural_waypoints: list) -> tuple:
+        if not self.ruckig_initialized or len(neural_waypoints) == 0:
+            return neural_waypoints[0] if neural_waypoints else current_q, np.zeros(7), np.zeros(7)
+
+        try:
+            # Set current state
+            self.ruckig_input.current_position = current_q
+            
+            if self.current_joint_velocity is not None:
+                self.ruckig_input.current_velocity = self.current_joint_velocity.tolist()
+            else:
+                self.ruckig_input.current_velocity = [0.0] * 7
+                
+            if self.current_joint_acceleration is not None:
+                self.ruckig_input.current_acceleration = self.current_joint_acceleration.tolist()
+            else:
+                self.ruckig_input.current_acceleration = [0.0] * 7
+
+            target_waypoint = neural_waypoints[-1]
+
+            # # Check if we're close to the target (better than using buffer size)
+            # if self.target_pose is not None:
+            #     # Calculate distance to target
+            #     current_pose = FrankaRealRobot.fk(current_q, eff_frame="right_gripper")
+            #     position_error = np.linalg.norm(current_pose._xyz - self.target_pose._xyz)
+                
+            #     # If we're far from target, maintain current motion for smoothness
+            #     if position_error > 0.05:  # 5cm threshold
+            #         if self.current_joint_velocity is not None:
+            #             target_velocity = self.current_joint_velocity.tolist()
+            #         else:
+            #             target_velocity = [0.0] * 7
+                        
+            #         if self.current_joint_acceleration is not None:
+            #             target_acceleration = self.current_joint_acceleration.tolist()
+            #         else:
+            #             target_acceleration = [0.0] * 7
+            #     else:
+            #         # Close to target - start slowing down
+            #         # Scale velocity based on proximity (0.05m = 5cm threshold)
+            #         slowdown_factor = min(1.0, position_error / 0.05)
+            #         if self.current_joint_velocity is not None:
+            #             target_velocity = (self.current_joint_velocity * slowdown_factor).tolist()
+            #         else:
+            #             target_velocity = [0.0] * 7
+            #         target_acceleration = [0.0] * 7
+            # else:
+            #     # No target pose available, use conservative approach
+            target_velocity = [0.0] * 7
+            target_acceleration = [0.0] * 7
+
+            self.ruckig_input.target_position = target_waypoint
+            self.ruckig_input.target_velocity = target_velocity
+            self.ruckig_input.target_acceleration = target_acceleration
+
+            # Calculate trajectory
+            result = self.ruckig.update(self.ruckig_input, self.ruckig_output)
+
+            if result == Result.Finished:
+                smoothed_q = self.ruckig_output.new_position
+                smoothed_velocity = self.ruckig_output.new_velocity
+                smoothed_acceleration = self.ruckig_output.new_acceleration
+                return smoothed_q, smoothed_velocity, smoothed_acceleration
+            else:
+                rospy.logwarn_throttle(5, f"Ruckig failed (result: {result}), using neural output")
+                return neural_waypoints[0], np.zeros(7), np.zeros(7)
+
+        except Exception as e:
+            rospy.logerr_throttle(5, f"Ruckig smoothing error: {e}")
+            return neural_waypoints[0] if neural_waypoints else current_q, np.zeros(7), np.zeros(7)
+
+    def franka_state_callback(self, msg: JointState):
+        """
+        Callback for franka_states to get joint velocities and accelerations
+        """
+        if USE_SELF_FEEDBACK:
+            return  # Ignore real robot states in self-feedback mode
+
+        with self.control_lock:
+            # Extract velocities and accelerations from franka_states message
+            # The franka_states message contains dq (joint velocities) and ddq (joint accelerations)
+            if hasattr(msg, 'dq') and len(msg.dq) >= 7:
+                self.current_joint_velocity = np.array(msg.dq[:7])
+                rospy.loginfo_once("Received first joint velocities from franka_states")
+                
+            if hasattr(msg, 'ddq') and len(msg.ddq) >= 7:
+                self.current_joint_acceleration = np.array(msg.ddq[:7])
+                rospy.loginfo_once("Received first joint accelerations from franka_states")
+                
+            # If the message doesn't have dq/ddq fields, try to extract from velocity/effort fields
+            elif len(msg.velocity) >= 7:
+                self.current_joint_velocity = np.array(msg.velocity[:7])
+                rospy.loginfo_once("Received first joint velocities from velocity field")
+                
+            if len(msg.effort) >= 7:
+                # Note: effort might not be acceleration, but it's better than nothing
+                # You might need to convert from torque to acceleration using robot dynamics
+                self.current_joint_acceleration = np.array(msg.effort[:7]) * 0.1  # Simple scaling
+                rospy.loginfo_once("Received first joint accelerations from effort field (scaled)")
+
     def stop_control_callback(self, msg):
         """
         Handle stop control commands
@@ -295,6 +458,7 @@ class ReactiveControllerNode:
             with self.control_lock:
                 self.stop_requested = True
                 self.is_controlling = False
+                self.waypoint_buffer = []  # Clear waypoint buffer
 
     def publish_joint_states(self, event=None):
         """
@@ -319,7 +483,13 @@ class ReactiveControllerNode:
                 "panda_finger_joint2",
             ]
             msg.position = self.full_joint_state.tolist()
-            msg.velocity = [0.0] * 9
+            
+            # Include velocities if available
+            if self.current_joint_velocity is not None:
+                msg.velocity = self.current_joint_velocity.tolist() + [0.0, 0.0]
+            else:
+                msg.velocity = [0.0] * 9
+                
             msg.effort = [0.0] * 9
 
             self.joint_state_publisher.publish(msg)
@@ -342,6 +512,10 @@ class ReactiveControllerNode:
                         [msg.position[:7], NEUTRAL_CONFIG[7:9]]
                     )
 
+                # Extract velocities if available
+                if len(msg.velocity) >= 7:
+                    self.current_joint_velocity = np.array(msg.velocity[:7])
+                    
                 if self.current_joint_state is not None:
                     rospy.loginfo_once("Received first real joint state")
 
@@ -424,7 +598,7 @@ class ReactiveControllerNode:
             & (xyz[:, 0] < 1.5)
             & (xyz[:, 1] > -1.5)
             & (xyz[:, 1] < 1.5)
-            & (xyz[:, 2] > -0.05)
+            & (xyz[:, 2] > -0.1)
             & (xyz[:, 2] < 1.5)
         )
 
@@ -448,7 +622,7 @@ class ReactiveControllerNode:
                 indices = np.random.choice(
                     len(xyz_repeated), size=NUM_OBSTACLE_POINTS, replace=False
                 )
-                return xyz_repeated[indices].astype(np.float32), rgba_repeated[
+                return xyz_repeated[indices].ast(np.float32), rgba_repeated[
                     indices
                 ].astype(np.float32)
             else:
@@ -532,6 +706,7 @@ class ReactiveControllerNode:
         with self.control_lock:
             self.target_pose = target
             self.stop_requested = False
+            self.waypoint_buffer = []  # Clear waypoint buffer on new target
 
             # Stop current control if running
             if self.is_controlling:
@@ -551,7 +726,7 @@ class ReactiveControllerNode:
 
     def control_loop(self):
         """
-        Main reactive control loop
+        Main reactive control loop with Ruckig smoothing
         """
         rate = rospy.Rate(self.control_rate)
 
@@ -563,6 +738,7 @@ class ReactiveControllerNode:
                         rospy.loginfo("Stop requested, exiting control loop")
                         self.is_controlling = False
                         self.status_publisher.publish(Bool(data=False))
+                        self.waypoint_buffer = []
                         break
 
                     # Check if we have all necessary data
@@ -589,37 +765,57 @@ class ReactiveControllerNode:
                         rospy.loginfo("Target reached! Stopping reactive control.")
                         self.is_controlling = False
                         self.status_publisher.publish(Bool(data=False))
+                        self.waypoint_buffer = []
                         break
 
-                    # Get next action
-                    q_next = self.controller.get_next_action(
+                    # Get next action from neural network
+                    raw_q_next = self.controller.get_next_action(
                         self.current_joint_state,
                         self.target_pose,
                         self.latest_pointcloud,
                     )
 
+                    # Add to waypoint buffer for smoothing
+                    self.waypoint_buffer.append(raw_q_next.copy())
+                    
+                    # Keep buffer size manageable
+                    if len(self.waypoint_buffer) > self.max_waypoints:
+                        self.waypoint_buffer.pop(0)
+
+                    # Apply Ruckig smoothing if available
+                    if self.ruckig_initialized and len(self.waypoint_buffer) >= 1:
+                        smoothed_q_next, smoothed_velocity, smoothed_acceleration = self.smooth_with_ruckig(
+                            self.current_joint_state, self.waypoint_buffer
+                        )
+                    else:
+                        # When Ruckig is not available, use raw output with zero velocity/acceleration
+                        smoothed_q_next = raw_q_next
+                        smoothed_velocity = np.zeros(7)
+                        smoothed_acceleration = np.zeros(7)
+
                     # Update internal state based on feedback mode
                     if USE_SELF_FEEDBACK:
-                        # Self-feedback: use commanded positions as current state
-                        self.current_joint_state = q_next.copy()
-                        self.full_joint_state[:7] = q_next
+                        # Self-feedback: use smoothed commanded positions as current state
+                        self.current_joint_state = smoothed_q_next.copy()
+                        self.full_joint_state[:7] = smoothed_q_next
                         # Note: Joint states will be published by the timer
 
-                # Send joint command
-                self.send_joint_command(q_next)
+                # Send smoothed joint command
+                self.send_joint_command(smoothed_q_next, smoothed_velocity, smoothed_acceleration)
                 self.status_publisher.publish(Bool(data=True))
 
             except Exception as e:
                 rospy.logerr(f"Error in control loop: {e}")
                 self.is_controlling = False
                 self.status_publisher.publish(Bool(data=False))
+                self.waypoint_buffer = []
                 break
 
             rate.sleep()
 
         rospy.loginfo("Reactive control loop stopped")
 
-    def send_joint_command(self, joint_positions: np.ndarray):
+    def send_joint_command(self, joint_positions: np.ndarray, joint_velocities: np.ndarray, joint_accelerations: np.ndarray):
         """
         Send joint command to the robot with adaptive duration
         """
@@ -628,20 +824,20 @@ class ReactiveControllerNode:
                 return
                 
             # Calculate the maximum joint position change
-            joint_deltas = np.abs(joint_positions - self.current_joint_state)
+            joint_deltas = np.abs(joint_positions[:4] - self.current_joint_state[:4])
             max_delta = np.max(joint_deltas)
             
             # Scale duration based on the maximum change
             # Base duration + scaled component
-            base_duration = 0.2  # Minimum duration for very small movements
-            max_allowed_duration = 1.0  # Maximum duration for safety
+            base_duration = 0.1  # Minimum duration for very small movements
+            max_allowed_duration = 0.4  # Maximum duration for safety
             scaling_factor = 4.0  # Adjust this to control sensitivity
             
             # Calculate adaptive duration
             duration = base_duration + (max_delta * scaling_factor)
             duration = min(max(duration, base_duration), max_allowed_duration)
             
-            rospy.logdebug(f"Max joint delta: {max_delta:.4f}, Command duration: {duration:.3f}s")
+            rospy.loginfo(f"Max joint delta: {max_delta:.4f}, Command duration: {duration:.3f}s")
 
         traj_msg = JointTrajectory()
         traj_msg.header.stamp = rospy.Time.now()
@@ -657,8 +853,8 @@ class ReactiveControllerNode:
 
         point = JointTrajectoryPoint()
         point.positions = joint_positions.tolist()
-        point.velocities = [0.0] * 7
-        point.accelerations = [0.0] * 7
+        point.velocities = joint_velocities.tolist()
+        point.accelerations = joint_accelerations.tolist()
         point.time_from_start = rospy.Duration.from_sec(duration)
 
         traj_msg.points.append(point)
