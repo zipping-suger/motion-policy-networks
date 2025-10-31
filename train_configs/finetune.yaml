@@ -1,7 +1,7 @@
 train_mode: "finetune"
 
 use_her: true
-her_update_interval: 2
+her_update_interval: 5
 her_position_threshold: 0.05
 her_rotation_threshold: 0.2
 
@@ -31,7 +31,7 @@ checkpoint_interval: 10
 validation_interval: 2
 gpus: 1
 batch_size: 32
-save_checkpoint_dir: /workspace/her_cabinet_6k_6k_samples_every_2_epochs
+save_checkpoint_dir: /workspace/her_cabinet_6k_6k_samples_every_5_epochs
 max_epochs: 50
-experiment_name: her_cabinet_6k_6k_samples_every_2_epochs
+experiment_name: her_cabinet_6k_6k_samples_every_5_epochs
 description: "HER finetuning on cabinet_6k dataset with memory optimizations"
