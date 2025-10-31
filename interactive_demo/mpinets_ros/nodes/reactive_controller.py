@@ -188,7 +188,6 @@ class ReactiveControllerNode:
 
         # Control parameters
         self.control_rate = rospy.get_param("~control_rate", 50.0)  # Hz
-        self.control_dt = 0.05
 
         # Ruckig initialization
         self.ruckig_initialized = False
@@ -226,6 +225,8 @@ class ReactiveControllerNode:
         self.control_thread = None
         self.control_lock = threading.Lock()
         self.stop_requested = False
+        self.target_reached = False  # New flag to track if target has been reached
+        self.maintenance_joint_state = None  # Joint state to maintain when target is reached
 
         # Waypoint buffer for Ruckig smoothing
         self.waypoint_buffer = []
@@ -369,36 +370,18 @@ class ReactiveControllerNode:
 
             target_waypoint = neural_waypoints[-1]
 
-            # # Check if we're close to the target (better than using buffer size)
-            # if self.target_pose is not None:
-            #     # Calculate distance to target
-            #     current_pose = FrankaRealRobot.fk(current_q, eff_frame="right_gripper")
-            #     position_error = np.linalg.norm(current_pose._xyz - self.target_pose._xyz)
+            if self.current_joint_velocity is not None:
+                target_velocity = self.current_joint_velocity.tolist()
+            else:
+                target_velocity = [0.0] * 7
                 
-            #     # If we're far from target, maintain current motion for smoothness
-            #     if position_error > 0.05:  # 5cm threshold
-            #         if self.current_joint_velocity is not None:
-            #             target_velocity = self.current_joint_velocity.tolist()
-            #         else:
-            #             target_velocity = [0.0] * 7
-                        
-            #         if self.current_joint_acceleration is not None:
-            #             target_acceleration = self.current_joint_acceleration.tolist()
-            #         else:
-            #             target_acceleration = [0.0] * 7
-            #     else:
-            #         # Close to target - start slowing down
-            #         # Scale velocity based on proximity (0.05m = 5cm threshold)
-            #         slowdown_factor = min(1.0, position_error / 0.05)
-            #         if self.current_joint_velocity is not None:
-            #             target_velocity = (self.current_joint_velocity * slowdown_factor).tolist()
-            #         else:
-            #             target_velocity = [0.0] * 7
-            #         target_acceleration = [0.0] * 7
-            # else:
-            #     # No target pose available, use conservative approach
-            target_velocity = [0.0] * 7
-            target_acceleration = [0.0] * 7
+            if self.current_joint_acceleration is not None:
+                target_acceleration = self.current_joint_acceleration.tolist()
+            else:
+                target_acceleration = [0.0] * 7
+
+            # target_velocity = [0.0] * 7
+            # target_acceleration = [0.0] * 7
 
             self.ruckig_input.target_position = target_waypoint
             self.ruckig_input.target_velocity = target_velocity
@@ -458,6 +441,8 @@ class ReactiveControllerNode:
             with self.control_lock:
                 self.stop_requested = True
                 self.is_controlling = False
+                self.target_reached = False  # Reset target reached flag
+                self.maintenance_joint_state = None  # Clear maintenance state
                 self.waypoint_buffer = []  # Clear waypoint buffer
 
     def publish_joint_states(self, event=None):
@@ -519,28 +504,39 @@ class ReactiveControllerNode:
                 if self.current_joint_state is not None:
                     rospy.loginfo_once("Received first real joint state")
 
+
     def processed_pointcloud_callback(self, msg: PointCloud2):
         """
         Callback for pre-processed pointcloud messages
         """
         try:
             points_list = []
-            colors_list = []
 
-            for p in pc2.read_points(
-                msg, field_names=("x", "y", "z", "r", "g", "b", "a"), skip_nans=True
-            ):
-                points_list.append([p[0], p[1], p[2]])
-                colors_list.append([p[3], p[4], p[5], p[6]])
+            # Check available fields
+            field_names = [field.name for field in msg.fields]
+            
+            if 'r' in field_names and 'g' in field_names and 'b' in field_names:
+                # Has color fields
+                for p in pc2.read_points(
+                    msg, field_names=("x", "y", "z", "r", "g", "b", "a"), skip_nans=True
+                ):
+                    points_list.append([p[0], p[1], p[2]])
+            else:
+                # No color fields, just read x,y,z
+                for p in pc2.read_points(
+                    msg, field_names=("x", "y", "z"), skip_nans=True
+                ):
+                    points_list.append([p[0], p[1], p[2]])
 
             if points_list:
                 points = np.array(points_list, dtype=np.float32)
-                colors = np.array(colors_list, dtype=np.float32)
 
                 if len(points) == NUM_OBSTACLE_POINTS:
                     with self.control_lock:
                         self.latest_pointcloud = points
-                        self.latest_pointcloud_colors = colors
+                        # Create default white colors for visualization
+                        default_colors = np.ones((len(points), 4), dtype=np.float32)
+                        self.latest_pointcloud_colors = default_colors
                     rospy.loginfo_once("Received first pre-processed point cloud")
                 else:
                     rospy.logwarn_throttle(
@@ -706,6 +702,8 @@ class ReactiveControllerNode:
         with self.control_lock:
             self.target_pose = target
             self.stop_requested = False
+            self.target_reached = False  # Reset target reached flag for new target
+            self.maintenance_joint_state = None  # Clear maintenance state
             self.waypoint_buffer = []  # Clear waypoint buffer on new target
 
             # Stop current control if running
@@ -727,6 +725,7 @@ class ReactiveControllerNode:
     def control_loop(self):
         """
         Main reactive control loop with Ruckig smoothing
+        Now continues running even after target is reached, but blocks neural network when target is reached
         """
         rate = rospy.Rate(self.control_rate)
 
@@ -737,6 +736,8 @@ class ReactiveControllerNode:
                     if self.stop_requested:
                         rospy.loginfo("Stop requested, exiting control loop")
                         self.is_controlling = False
+                        self.target_reached = False
+                        self.maintenance_joint_state = None
                         self.status_publisher.publish(Bool(data=False))
                         self.waypoint_buffer = []
                         break
@@ -758,37 +759,50 @@ class ReactiveControllerNode:
                             rospy.logwarn_throttle(5, "Waiting for point cloud data...")
                         continue
 
-                    # Check if we've reached the target
-                    if self.controller.check_success(
+                    # Check if we've reached the target (but don't stop the loop)
+                    target_reached_now = self.controller.check_success(
                         self.current_joint_state, self.target_pose
-                    ):
-                        rospy.loginfo("Target reached! Stopping reactive control.")
-                        self.is_controlling = False
-                        self.status_publisher.publish(Bool(data=False))
-                        self.waypoint_buffer = []
-                        break
-
-                    # Get next action from neural network
-                    raw_q_next = self.controller.get_next_action(
-                        self.current_joint_state,
-                        self.target_pose,
-                        self.latest_pointcloud,
                     )
-
-                    # Add to waypoint buffer for smoothing
-                    self.waypoint_buffer.append(raw_q_next.copy())
                     
-                    # Keep buffer size manageable
-                    if len(self.waypoint_buffer) > self.max_waypoints:
-                        self.waypoint_buffer.pop(0)
+                    # Log when target is first reached and store maintenance joint state
+                    if target_reached_now and not self.target_reached:
+                        rospy.loginfo("Target reached! Switching to maintenance mode (neural network blocked).")
+                        self.target_reached = True
+                        self.maintenance_joint_state = self.current_joint_state.copy()
+                        self.waypoint_buffer = []  # Clear waypoint buffer
+                    
+                    # Log periodically if we're maintaining position at target
+                    if self.target_reached:
+                        rospy.loginfo_throttle(10, "Maintaining position at target (neural network blocked)")
 
-                    # Apply Ruckig smoothing if available
-                    if self.ruckig_initialized and len(self.waypoint_buffer) >= 1:
+                    # BLOCK NEURAL NETWORK WHEN TARGET IS REACHED
+                    if self.target_reached and self.maintenance_joint_state is not None:
+                        # Use the stored joint state for maintenance (no neural network)
+                        raw_q_next = self.maintenance_joint_state.copy()
+                        rospy.loginfo_throttle(5, "Using maintenance joint state (neural network blocked)")
+                    else:
+                        # Get next action from neural network (only when not at target)
+                        raw_q_next = self.controller.get_next_action(
+                            self.current_joint_state,
+                            self.target_pose,
+                            self.latest_pointcloud,
+                        )
+
+                        # Add to waypoint buffer for smoothing
+                        self.waypoint_buffer.append(raw_q_next.copy())
+                        
+                        # Keep buffer size manageable
+                        if len(self.waypoint_buffer) > self.max_waypoints:
+                            self.waypoint_buffer.pop(0)
+
+                    # Apply Ruckig smoothing if available and we have waypoints
+                    if (self.ruckig_initialized and len(self.waypoint_buffer) >= 1 and 
+                        not self.target_reached):
                         smoothed_q_next, smoothed_velocity, smoothed_acceleration = self.smooth_with_ruckig(
                             self.current_joint_state, self.waypoint_buffer
                         )
                     else:
-                        # When Ruckig is not available, use raw output with zero velocity/acceleration
+                        # When Ruckig is not available or target is reached, use current output with zero velocity/acceleration
                         smoothed_q_next = raw_q_next
                         smoothed_velocity = np.zeros(7)
                         smoothed_acceleration = np.zeros(7)
@@ -807,6 +821,8 @@ class ReactiveControllerNode:
             except Exception as e:
                 rospy.logerr(f"Error in control loop: {e}")
                 self.is_controlling = False
+                self.target_reached = False
+                self.maintenance_joint_state = None
                 self.status_publisher.publish(Bool(data=False))
                 self.waypoint_buffer = []
                 break
@@ -831,13 +847,17 @@ class ReactiveControllerNode:
             # Base duration + scaled component
             base_duration = 0.1  # Minimum duration for very small movements
             max_allowed_duration = 0.4  # Maximum duration for safety
-            scaling_factor = 4.0  # Adjust this to control sensitivity
+            scaling_factor = 10.0  # Adjust this to control sensitivity
             
             # Calculate adaptive duration
             duration = base_duration + (max_delta * scaling_factor)
             duration = min(max(duration, base_duration), max_allowed_duration)
             
-            rospy.loginfo(f"Max joint delta: {max_delta:.4f}, Command duration: {duration:.3f}s")
+            # If target is reached, use a fixed small duration for stability
+            if self.target_reached:
+                duration = 0.1  # Fixed duration when maintaining position
+                
+            rospy.loginfo_throttle(5, f"Max joint delta: {max_delta:.4f}, Command duration: {duration:.3f}s, Target reached: {self.target_reached}")
 
         traj_msg = JointTrajectory()
         traj_msg.header.stamp = rospy.Time.now()

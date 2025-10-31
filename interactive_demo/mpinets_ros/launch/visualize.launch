@@ -21,7 +21,7 @@
   </node>
   
   <node name="static_link0_future_robot_states_link0_transform" pkg="tf" type="static_transform_publisher" args="0 0 0 0 0 0 panda_link0 planned_robot_states/panda_link0 100"  output="screen" />
-  <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" args="joint_states:=/mpinets/joint_states" respawn="true" output="screen" />
+  <node name="mpinet_robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" args="joint_states:=/mpinets/joint_states" respawn="true" output="screen" />
   <node name="planned_robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" args="joint_states:=/mpinets/planned_joint_states" respawn="true" output="screen">
     <param name="/tf_prefix" value="/planned_robot_states" />
   </node>
