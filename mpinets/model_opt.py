@@ -99,8 +99,10 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         num_robot_points: int,
         goal_loss_weight: float,
         collision_loss_weight: float,
-        self_collision_loss_weight: float = 2.0,  # New weight for self-collision
-        use_self_collision: bool = True,  # Flag to enable/disable self-collision loss
+        self_collision_loss_weight: float = 2.0,
+        use_self_collision: bool = False,
+        smoothness_weight: float = 1,  # Start with 1
+        use_smoothness_loss: bool = True,
     ):
         super().__init__()
         self.num_robot_points = num_robot_points
@@ -110,6 +112,8 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         self.collision_loss_weight = collision_loss_weight
         self.self_collision_loss_weight = self_collision_loss_weight
         self.use_self_collision = use_self_collision
+        self.smoothness_weight = smoothness_weight
+        self.use_smoothness_loss = use_smoothness_loss
         self.validation_step_outputs = []
 
         # Update the point cloud encoder or not
@@ -119,7 +123,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
         return optimizer
-    
+
     def on_before_optimizer_step(self, optimizer, optimizer_idx=None):
         """
         PyTorch Lightning hook: clip gradients before optimizer step
@@ -166,33 +170,27 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
         return trajectory
 
-    # Differentialble rollout evaluation function with repect to the rollout
-    def eval_rollout(
-        self, rollout: List[torch.Tensor], batch: torch.Tensor
-    ) -> torch.Tensor:
+    def eval_rollout(self, rollout: List[torch.Tensor], batch: torch.Tensor) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         """
-        Evaluates a rollout by computing the difference between the last configuration
-        in the rollout and the target configuration, and sums collision loss over the rollout.
-        :param rollout List[torch.Tensor]: A list of configurations in the rollout
-        :param target_configuration torch.Tensor: The target configuration to compare against
-        :rtype torch.Tensor: Scalar loss (mean squared error between last and target configuration + collision loss)
+        Enhanced with Action Smoothness Loss
         """
         assert len(rollout) > 0, "Rollout must contain at least one configuration"
 
         # Goal reaching loss
         last_configuration = rollout[-1]
-        # Goal reaching loss in end-effector space
-        pred_pose = self.fk_sampler.end_effector_pose(last_configuration)  # (B,4,4)
-        target_pose = batch[
-            "target_pose"
-        ]  # (B,12) [x, y, z, flattened rotation matrix]
+        pred_pose = self.fk_sampler.end_effector_pose(last_configuration)
+        target_pose = batch["target_pose"]
 
         position_loss, rotation_loss = compute_pose_loss_rotmat(pred_pose, target_pose)
-
-        # Combine losses with balancing factor
-        goal_loss = torch.mean(
-            position_loss + 0.1 * rotation_loss
-        )  # Follow the rule of thumb, to make them roughly equal in scale
+        goal_loss = torch.mean(position_loss + 0.1 * rotation_loss)
 
         # Collision loss over the entire rollout
         (
@@ -234,38 +232,59 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
                 cylinder_quats,
             )
             total_colli_loss += colli_loss
-            
+
             # Self-collision loss (only if enabled)
             if self.use_self_collision:
-                # Sample point clouds per link
-                per_link_pcs = self.fk_sampler.sample_per_link(q, total_points=self.num_robot_points)
-                
+                per_link_pcs = self.fk_sampler.sample_per_link(
+                    q, total_points=self.num_robot_points
+                )
+
                 for link_a_name, link_b_name in FRANKA_SELF_COLLISION_PAIRS:
                     if link_a_name in per_link_pcs and link_b_name in per_link_pcs:
-                        pc_a = per_link_pcs[link_a_name]  # Shape: (B, K_a, 3)
-                        pc_b = per_link_pcs[link_b_name]  # Shape: (B, K_b, 3)
+                        pc_a = per_link_pcs[link_a_name]
+                        pc_b = per_link_pcs[link_b_name]
 
-                        # Batched distance computation
-                        dists = torch.cdist(pc_a, pc_b)  # Shape: (B, K_a, K_b)
-
-                        # Find the minimum distance for each batch
-                        min_dists = torch.min(dists.view(dists.shape[0], -1), dim=1)[0]  # Shape: (B,)
-
-                        # Hinge loss for self-collision
+                        dists = torch.cdist(pc_a, pc_b)
+                        min_dists = torch.min(dists.view(dists.shape[0], -1), dim=1)[0]
                         self_colli_loss = torch.sum(torch.clamp(0.03 - min_dists, min=0))
                         total_self_colli_loss += self_colli_loss
 
-        # Calculate total loss with optional self-collision component
+        # ACTION SMOOTHNESS LOSS - Core addition
+        smoothness_loss = 0.0
+        if self.use_smoothness_loss and len(rollout) > 1:
+            # Compute joint velocities between consecutive configurations
+            for i in range(len(rollout) - 1):
+                # Velocity: difference between consecutive configurations
+                velocity = rollout[i + 1] - rollout[i]
+
+                # L2 norm of velocity (encourages small, smooth changes)
+                velocity_penalty = torch.mean(torch.sum(velocity**2, dim=1))
+                smoothness_loss += velocity_penalty
+
+                # Optional: Add acceleration penalty for even smoother motions
+                if i < len(rollout) - 2:
+                    acceleration = rollout[i + 2] - 2 * rollout[i + 1] + rollout[i]
+                    acceleration_penalty = torch.mean(torch.sum(acceleration**2, dim=1))
+                    smoothness_loss += (
+                        0.3 * acceleration_penalty
+                    )  # Lower weight for acceleration
+
+            # Normalize by number of transitions
+            smoothness_loss = smoothness_loss / (len(rollout) - 1)
+
+        # Calculate total loss with smoothness term
         if self.use_self_collision:
             train_loss = (
                 self.goal_loss_weight * goal_loss
                 + self.collision_loss_weight * total_colli_loss
                 + self.self_collision_loss_weight * total_self_colli_loss
+                + self.smoothness_weight * smoothness_loss
             )
         else:
             train_loss = (
                 self.goal_loss_weight * goal_loss
                 + self.collision_loss_weight * total_colli_loss
+                + self.smoothness_weight * smoothness_loss
             )
 
         return (
@@ -275,22 +294,13 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             total_self_colli_loss,
             torch.mean(position_loss),
             torch.mean(rotation_loss),
+            smoothness_loss,  # Return for logging
         )
 
-    def training_step(  # type: ignore[override]
-        self, batch: Dict[str, torch.Tensor], batch_idx: int
-    ) -> torch.Tensor:
+    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """
-        A function called automatically by Pytorch Lightning during training.
-        This function handles the forward pass, the loss calculation, and what to log
-
-        :param batch Dict[str, torch.Tensor]: A data batch coming from the
-                                                   data loader--should already be
-                                                   on the correct device
-        :param batch_idx int: The index of the batch (not used by this function)
-        :rtype torch.Tensor: The overall weighted loss (used for backprop)
+        Updated to log smoothness loss
         """
-        # Rollout the trajectory
         if self.fk_sampler is None:
             self.fk_sampler = FrankaSampler(self.device, use_cache=True)
         if self.collision_sampler is None:
@@ -299,10 +309,18 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             )
         rollout = self.rollout(batch, ROLLOUT_LENGTH, self.sample)
 
-        train_loss, goal_loss, colli_loss, self_colli_loss, position_loss, rotation_loss = (
-            self.eval_rollout(rollout, batch)
-        )
+        # Unpack all losses including smoothness_loss
+        (
+            train_loss,
+            goal_loss,
+            colli_loss,
+            self_colli_loss,
+            position_loss,
+            rotation_loss,
+            smoothness_loss,
+        ) = self.eval_rollout(rollout, batch)
 
+        # Log all losses
         self.log("train_loss", train_loss)
         self.log("goal_loss", goal_loss)
         self.log("colli_loss", colli_loss)
@@ -310,6 +328,9 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             self.log("self_colli_loss", self_colli_loss)
         self.log("position_loss", position_loss)
         self.log("rotation_loss", rotation_loss)
+        if self.use_smoothness_loss:
+            self.log("smoothness_loss", smoothness_loss)
+
         return train_loss
 
     def sample(self, q: torch.Tensor) -> torch.Tensor:
