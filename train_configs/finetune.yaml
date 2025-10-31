@@ -19,7 +19,7 @@ checkpoint_interval: 10
 validation_interval: 10
 gpus: 6 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/finetune_small_mpinets_hybrid_training_data_smoothness
+save_checkpoint_dir: /workspace/finetune_small_mpinets_hybrid_training_data_smoothness_v2
 max_epochs: 50
-experiment_name: finetune_mpinets_hybrid_training_data_smoothness
-description: "Finetuning pretrained_on_small on hybrid training data with smoothness loss"
+experiment_name: finetune_mpinets_hybrid_training_data_smoothness_v2
+description: "Finetuning pretrained_on_small on hybrid training data with smoothness loss weight 0.1"
