@@ -847,7 +847,7 @@ class ReactiveControllerNode:
             # Base duration + scaled component
             base_duration = 0.1  # Minimum duration for very small movements
             max_allowed_duration = 0.4  # Maximum duration for safety
-            scaling_factor = 10.0  # Adjust this to control sensitivity
+            scaling_factor = 6.0  # Adjust this to control sensitivity
             
             # Calculate adaptive duration
             duration = base_duration + (max_delta * scaling_factor)
