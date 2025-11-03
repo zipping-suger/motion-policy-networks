@@ -173,3 +173,5 @@ checkpoints/
 problems/
 
 .vscode/
+
+.npy
