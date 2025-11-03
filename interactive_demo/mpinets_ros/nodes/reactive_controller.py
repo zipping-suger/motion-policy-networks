@@ -33,6 +33,7 @@ NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
 
+RUCKIG_AVAILABLE = False
 # Global parameter: Set to True for self-feedback (simulation), False for real robot feedback
 USE_SELF_FEEDBACK = rospy.get_param("~use_self_feedback", False)  # Default is False
 
@@ -145,19 +146,25 @@ class ReactiveController:
     def check_success(self, q_current: np.ndarray, target_pose: SE3) -> bool:
         """
         Check if we've reached the target pose - using same criteria as planning_node.py
-
-        :param q_current np.ndarray: Current joint configuration
-        :param target_pose SE3: Target pose
-        :rtype bool: Whether we've reached the target
         """
         # Get current end-effector pose
         eff_pose = FrankaRealRobot.fk(q_current, eff_frame="right_gripper")
 
-        # Check position and orientation thresholds (same as planning_node.py)
+        # Check position threshold
         position_error = np.linalg.norm(eff_pose._xyz - target_pose._xyz)
-        orientation_error = np.abs(
-            np.degrees((eff_pose.so3._quat * target_pose.so3._quat.conjugate).radians)
-        )
+        
+        # Calculate orientation errors
+        quat1, quat2 = eff_pose.so3._quat, target_pose.so3._quat
+        
+        # Regular orientation error
+        regular_error = np.abs(np.degrees((quat1 * quat2.conjugate).radians))
+        
+        # Error with 180° z-axis flip
+        flip_z_quat = SO3.from_rotvec([0, 0, np.pi])._quat
+        flipped_error = np.abs(np.degrees((quat1 * (quat2 * flip_z_quat).conjugate).radians))
+        
+        # Use minimum orientation error
+        orientation_error = min(regular_error, flipped_error)
 
         return position_error < 0.01 and orientation_error < 15
 
@@ -248,10 +255,6 @@ class ReactiveControllerNode:
             "/mpinets/control_status", Bool, queue_size=1
         )
 
-        self.full_point_cloud_publisher = rospy.Publisher(
-            "/mpinets/full_point_cloud", PointCloud2, queue_size=1
-        )
-
         # Joint state handling based on feedback mode
         if USE_SELF_FEEDBACK:
             # Self-feedback: publish our own joint states for visualization
@@ -302,8 +305,6 @@ class ReactiveControllerNode:
                 "Waiting for pre-processed pointcloud data from /mpinets/processed_pointcloud..."
             )
 
-            # Start a timer to publish the pointcloud for visualization
-            rospy.Timer(rospy.Duration(1.0), self.publish_pointcloud_data)
 
         # Load model
         rospy.loginfo("Loading model")
@@ -530,135 +531,6 @@ class ReactiveControllerNode:
         except Exception as e:
             rospy.logerr_throttle(10, f"Error reading processed point cloud: {e}")
 
-    def load_point_cloud_data(self, path: str):
-        """
-        Load point cloud from file (similar to planning_node.py)
-        """
-        observation_data = np.load(path, allow_pickle=True).item()
-
-        full_pc = tra.transform_points(
-            observation_data["pc"], observation_data["camera_pose"]
-        )
-
-        no_robot_mask = (
-            observation_data["label_map"]["robot"] != observation_data["pc_label"]
-        )
-        scene_pc = full_pc[no_robot_mask]
-
-        scene_colors = observation_data["pc_color"][no_robot_mask] / 255.0
-        scene_colors = np.concatenate(
-            (scene_colors, np.ones((len(scene_colors), 1))), axis=1
-        )
-
-        # Clean and downsample
-        scene_pc, scene_colors = self.clean_point_cloud(scene_pc, scene_colors)
-
-        with self.control_lock:
-            self.latest_pointcloud = scene_pc
-            self.latest_pointcloud_colors = scene_colors
-
-        rospy.Timer(
-            rospy.Duration(1.0),
-            partial(self.publish_point_cloud_data, scene_pc, scene_colors),
-        )
-
-    @staticmethod
-    def clean_point_cloud(xyz: np.ndarray, rgba: np.ndarray):
-        """
-        Clean and downsample point cloud (same as planning_node.py)
-        """
-        if len(xyz) == 0:
-            return np.zeros((NUM_OBSTACLE_POINTS, 3), dtype=np.float32), np.zeros(
-                (NUM_OBSTACLE_POINTS, 4), dtype=np.float32
-            )
-
-        workspace_mask = (
-            (xyz[:, 0] > 0.1)
-            & (xyz[:, 0] < 1.5)
-            & (xyz[:, 1] > -1.5)
-            & (xyz[:, 1] < 1.5)
-            & (xyz[:, 2] > -0.1)
-            & (xyz[:, 2] < 1.5)
-        )
-
-        xyz_filtered = xyz[workspace_mask]
-        rgba_filtered = rgba[workspace_mask]
-        n_filtered = len(xyz_filtered)
-
-        if n_filtered > NUM_OBSTACLE_POINTS:
-            indices = np.random.choice(
-                n_filtered, size=NUM_OBSTACLE_POINTS, replace=False
-            )
-            return xyz_filtered[indices].astype(np.float32), rgba_filtered[
-                indices
-            ].astype(np.float32)
-        elif n_filtered > 0:
-            repeat_factor = (NUM_OBSTACLE_POINTS + n_filtered - 1) // n_filtered
-            xyz_repeated = np.repeat(xyz_filtered, repeat_factor, axis=0)
-            rgba_repeated = np.repeat(rgba_filtered, repeat_factor, axis=0)
-
-            if len(xyz_repeated) > NUM_OBSTACLE_POINTS:
-                indices = np.random.choice(
-                    len(xyz_repeated), size=NUM_OBSTACLE_POINTS, replace=False
-                )
-                return xyz_repeated[indices].ast(np.float32), rgba_repeated[
-                    indices
-                ].astype(np.float32)
-            else:
-                return xyz_repeated.astype(np.float32), rgba_repeated.astype(np.float32)
-        else:
-            return np.zeros((NUM_OBSTACLE_POINTS, 3), dtype=np.float32), np.zeros(
-                (NUM_OBSTACLE_POINTS, 4), dtype=np.float32
-            )
-
-    def publish_pointcloud_data(self, event=None):
-        """
-        Publish pointcloud for visualization
-        """
-        with self.control_lock:
-            if (
-                self.latest_pointcloud is not None
-                and hasattr(self, "latest_pointcloud_colors")
-                and self.latest_pointcloud_colors is not None
-            ):
-                self.publish_point_cloud_data(
-                    self.latest_pointcloud, self.latest_pointcloud_colors
-                )
-
-    def publish_point_cloud_data(self, points: np.ndarray, colors: np.ndarray, _=None):
-        """
-        Publish point cloud for visualization (same as planning_node.py)
-        """
-        if len(points) == 0:
-            return
-
-        ros_dtype = PointField.FLOAT32
-        dtype = np.float32
-        itemsize = np.dtype(dtype).itemsize
-
-        colors[:, -1] = 0.5
-        data = np.concatenate((points, colors), axis=1).astype(dtype)
-        data = data.tobytes()
-
-        fields = [
-            PointField(name=n, offset=i * itemsize, datatype=ros_dtype, count=1)
-            for i, n in enumerate("xyzrgba")
-        ]
-
-        header = Header(frame_id="panda_link0", stamp=rospy.Time.now())
-        msg = PointCloud2(
-            header=header,
-            height=1,
-            width=points.shape[0],
-            is_dense=False,
-            is_bigendian=False,
-            fields=fields,
-            point_step=(itemsize * 7),
-            row_step=(itemsize * 7 * points.shape[0]),
-            data=data,
-        )
-        self.full_point_cloud_publisher.publish(msg)
-
     def planning_problem_callback(self, msg: PlanningProblem):
         """
         Start/restart reactive control with new target
@@ -834,8 +706,8 @@ class ReactiveControllerNode:
             
             # Scale duration based on the maximum change
             # Base duration + scaled component
-            base_duration = 0.1  # Minimum duration for very small movements
-            max_allowed_duration = 0.4  # Maximum duration for safety
+            base_duration = 0.05  # Minimum duration for very small movements
+            max_allowed_duration = 0.3  # Maximum duration for safety
             scaling_factor = 6.0  # Adjust this to control sensitivity
             
             # Calculate adaptive duration

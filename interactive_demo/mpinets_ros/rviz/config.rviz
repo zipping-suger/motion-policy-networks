@@ -67,7 +67,7 @@ Visualization Manager:
       Channel Name: intensity
       Class: rviz/PointCloud2
       Color: 255; 255; 255
-      Color Transformer: RGBF32
+      Color Transformer: RGB8
       Decay Time: 0
       Enabled: true
       Invert Rainbow: false
@@ -80,7 +80,7 @@ Visualization Manager:
       Size (Pixels): 3
       Size (m): 0.009999999776482582
       Style: Points
-      Topic: /mpinets/full_point_cloud
+      Topic: /camera_right/filtered/downsampled_points
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
@@ -97,82 +97,18 @@ Visualization Manager:
     - Alpha: 0.5
       Class: rviz/RobotModel
       Collision Enabled: false
-      Enabled: true
+      Enabled: false
       Links:
         All Links Enabled: true
         Expand Joint Details: false
         Expand Link Details: false
         Expand Tree: false
         Link Tree Style: Links in Alphabetic Order
-        panda_hand:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        panda_hand_tcp:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        panda_leftfinger:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        panda_link0:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        panda_link1:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        panda_link2:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        panda_link3:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        panda_link4:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        panda_link5:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        panda_link6:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        panda_link7:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        panda_link8:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        panda_rightfinger:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
       Name: Planned Robot Model
       Robot Description: robot_description
       TF Prefix: /planned_robot_states
       Update Interval: 0
-      Value: true
+      Value: false
       Visual Enabled: true
     - Alpha: 1
       Class: rviz/RobotModel
@@ -189,6 +125,11 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        panda_hand_sc:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
         panda_hand_tcp:
           Alpha: 1
           Show Axes: false
@@ -203,7 +144,17 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        panda_link0_sc:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
         panda_link1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        panda_link1_sc:
           Alpha: 1
           Show Axes: false
           Show Trail: false
@@ -213,7 +164,17 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        panda_link2_sc:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
         panda_link3:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        panda_link3_sc:
           Alpha: 1
           Show Axes: false
           Show Trail: false
@@ -223,7 +184,17 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        panda_link4_sc:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
         panda_link5:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        panda_link5_sc:
           Alpha: 1
           Show Axes: false
           Show Trail: false
@@ -233,7 +204,17 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        panda_link6_sc:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
         panda_link7:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        panda_link7_sc:
           Alpha: 1
           Show Axes: false
           Show Trail: false
@@ -242,7 +223,6 @@ Visualization Manager:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-          Value: true
         panda_rightfinger:
           Alpha: 1
           Show Axes: false
@@ -282,7 +262,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 3.4338955879211426
+      Distance: 2.9354259967803955
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -297,10 +277,10 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.42539820075035095
+      Pitch: 0.32539814710617065
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 1.1903965473175049
+      Yaw: 1.0153968334197998
     Saved: ~
 Window Geometry:
   Displays:
@@ -318,5 +298,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1200
-  X: 1086
-  Y: 314
+  X: 446
+  Y: 178
