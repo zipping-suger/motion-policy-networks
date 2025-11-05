@@ -14,12 +14,12 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: /workspace//pretrain_mpinets_hybrid_training_data_small_hybrid/n1hwxxua/epoch-epoch=2-end.ckpt
+model_path: /workspace/pretrain_mpinets_hybrid_training_data_small_hybrid/n1hwxxua/epoch-epoch=2-end.ckpt
 checkpoint_interval: 10
 validation_interval: 10
 gpus: 6 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/finetune_small_mpinets_hybrid_training_data_smoothness_v2
+save_checkpoint_dir: /workspace/finetune_small_mpinets_hybrid_training_data_vanilla
 max_epochs: 50
-experiment_name: finetune_mpinets_hybrid_training_data_smoothness_v2
-description: "Finetuning pretrained_on_small on hybrid training data with smoothness loss weight 0.1"
+experiment_name: finetune_mpinets_hybrid_training_data_vanilla
+description: "Finetuning pretrained_on_small on hybrid training data with vanilla losses"
