@@ -100,8 +100,8 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         goal_loss_weight: float,
         collision_loss_weight: float,
         self_collision_loss_weight: float = 2.0,
-        use_self_collision: bool = False,
-        smoothness_weight: float = 0.1,  
+        use_self_collision: bool = True,
+        smoothness_weight: float = 0.1, 
         use_smoothness_loss: bool = False,
     ):
         super().__init__()
