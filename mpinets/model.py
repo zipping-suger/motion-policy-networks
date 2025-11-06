@@ -47,6 +47,11 @@ class FlowMatchingMotionPolicyNetwork(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
+        self.register_buffer(
+            "displacement_std",
+            torch.tensor([0.01] * 7),
+        )
+
         # Original components
         self.point_cloud_encoder = MPiNetsPointNet()
         self.config_encoder = nn.Sequential(
@@ -182,7 +187,7 @@ class FlowMatchingMotionPolicyNetwork(pl.LightningModule):
 
         # Sample time and noise
         t = torch.rand(xyz.size(0), device=self.device)
-        x0 = torch.randn_like(target_displacement)  # noise
+        x0 = self.displacement_std * torch.randn_like(target_displacement)
 
         # Create noisy action (interpolated between noise and target)
         psi_t = self.psi_t(x0, target_displacement, t)
@@ -213,7 +218,7 @@ class FlowMatchingMotionPolicyNetwork(pl.LightningModule):
             num_steps = self.hparams.num_inference_steps
 
         # Start with noise
-        action = torch.randn_like(q)
+        action = self.displacement_std * torch.randn_like(q)  # Scaled!
 
         delta_t = 1.0 / num_steps
         t = torch.zeros(xyz.size(0), device=self.device)

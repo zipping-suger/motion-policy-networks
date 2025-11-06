@@ -11,7 +11,7 @@ data_module_parameters:
   trajectory_key: 'global_solutions' # Could also use 'global_solutions' for the global expert
   num_obstacle_points: 4096
   num_target_points: 128
-  random_scale: 0.015
+  random_scale: 0.0
 shared_parameters:
     num_robot_points: 2048  # This will be passed to the model
 
