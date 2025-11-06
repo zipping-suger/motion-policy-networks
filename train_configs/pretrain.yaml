@@ -16,7 +16,7 @@ shared_parameters:
 model_path: null
 checkpoint_interval: 10
 validation_interval: 3000
-gpus: 8 # If > 1, will use DDP for training.
+gpus: 6 # If > 1, will use DDP for training.
 batch_size: 32
 save_checkpoint_dir: /workspace/pretrain_mpinets_hybrid_training_data
 experiment_name: pretrain_mpinets_hybrid_training_data
