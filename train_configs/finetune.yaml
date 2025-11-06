@@ -18,7 +18,7 @@ model_path: /workspace/mpinets_finetune_mpinets_hybrid_training_data_small_hybri
 checkpoint_interval: 10
 validation_interval: 10
 gpus: 6 # If > 1, will use DDP for training.
-batch_size: 32
+batch_size: 48
 save_checkpoint_dir: /workspace/finetune_small_mpinets_hybrid_training_data_ultimate
 max_epochs: 50
 experiment_name: finetune_mpinets_hybrid_training_data_ultimate
