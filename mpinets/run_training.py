@@ -15,7 +15,7 @@ import uuid
 PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 sys.path.insert(0, PROJECT_ROOT)
 from mpinets.data_loader import DataModule
-from mpinets.model import TrainingMotionPolicyNetwork
+from mpinets.model import FlowMatchingMotionPolicyNetwork
 from mpinets.model_opt import TrainingPolicyNetOpt
 
 
@@ -23,9 +23,11 @@ def import_training_policy_net(mode):
     if mode == "finetune" or mode == "finetune_tasks":
         return TrainingPolicyNetOpt
     elif mode == "pretrain":
-        return TrainingMotionPolicyNetwork
+        return FlowMatchingMotionPolicyNetwork
     else:
-        raise ValueError(f"Unknown training mode: {mode}. Expected 'finetune' or 'pretrain'.")
+        raise ValueError(
+            f"Unknown training mode: {mode}. Expected 'finetune' or 'pretrain'."
+        )
 
 
 def setup_trainer(
@@ -39,23 +41,12 @@ def setup_trainer(
 ) -> pl.Trainer:
     """
     Creates the Pytorch Lightning trainer object
-
-    :param gpus int: The number of GPUs (if more than 1, uses DDP)
-    :param test bool: Whether to use a test dataset
-    :param should_checkpoint bool: Whether to save checkpoints
-    :param logger Optional[WandbLogger]: The logger object, set to None if logging is disabled
-    :param checkpoint_interval int: The number of minutes between checkpoints
-    :param checkpoint_dir str: The directory in which to save checkpoints (a subdirectory will
-                               be created according to the experiment ID)
-    :param validation_interval float: How often to run the validation step, either as a proportion
-                                      of the training epoch or as a number of batches
-    :rtype pl.Trainer: The trainer object
     """
     args: Dict[str, Any] = {}
 
     if test:
         args = {**args, "limit_train_batches": 10, "limit_val_batches": 3}
-        validation_interval = 2  # Overwritten to be an appropriate size for test
+        validation_interval = 2
     if (isinstance(gpus, list) and len(gpus) > 1) or (
         isinstance(gpus, int) and gpus > 1
     ):
@@ -65,25 +56,30 @@ def setup_trainer(
         }
     if validation_interval is not None:
         args = {**args, "val_check_interval": validation_interval}
+
     callbacks: List[Callback] = []
     if logger is not None:
         experiment_id = str(logger.experiment.id)
     else:
         experiment_id = str(uuid.uuid1())
+
     if should_checkpoint:
         if checkpoint_dir is not None:
             dirpath = Path(checkpoint_dir).resolve() / experiment_id
         else:
             dirpath = PROJECT_ROOT / "checkpoints" / experiment_id
         pl.utilities.rank_zero_info(f"Saving checkpoints to {dirpath}")
+
         every_n_checkpoint = ModelCheckpoint(
-            monitor="avg_target_error",  # <-- changed from "train_loss"
+            monitor="val_avg_target_error",
+            mode="min",  # ADDED: We want to minimize the target error
             save_last=True,
             dirpath=dirpath,
             train_time_interval=timedelta(minutes=checkpoint_interval),
         )
         epoch_end_checkpoint = ModelCheckpoint(
-            monitor="avg_target_error",  # <-- changed from "train_loss"
+            monitor="val_avg_target_error",
+            mode="min",  # ADDED: We want to minimize the target error
             save_last=True,
             dirpath=dirpath,
             save_on_train_epoch_end=True,
@@ -182,25 +178,22 @@ def run():
     )
     mode = config["train_mode"]
     TrainingPolicyNet = import_training_policy_net(mode)
-    
-    # Initialize the model
-    mdl = TrainingPolicyNet(
-        **(config["shared_parameters"] or {}),
-        **(config["training_model_parameters"] or {}),
-    )
+
+    # Initialize the model - UPDATED: Pass both parameter sets
     if config["model_path"] is None:
         print("Training from scratch")
         mdl = TrainingPolicyNet(
-            **(config["shared_parameters"] or {}),
+            **(config["shared_parameters"] or {}),  # ADDED: Pass shared_parameters
             **(config["training_model_parameters"] or {}),
         )
     else:
         print(f"Loading model from {config['model_path']}")
         mdl = TrainingPolicyNet.load_from_checkpoint(
             config["model_path"],
-            **(config["shared_parameters"] or {}),
+            **(config["shared_parameters"] or {}),  # ADDED: Pass shared_parameters
             **(config["training_model_parameters"] or {}),
         )
+
     if logger is not None:
         logger.watch(mdl, log="gradients", log_freq=100)
     trainer.fit(model=mdl, datamodule=dm)

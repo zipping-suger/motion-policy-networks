@@ -1,48 +1,53 @@
-# MIT License
-#
-# Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES, University of Washington. All rights reserved.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a
-# copy of this software and associated documentation files (the "Software"),
-# to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,
-# and/or sell copies of the Software, and to permit persons to whom the
-# Software is furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-# DEALINGS IN THE SOFTWARE.
-
 import torch
 from torch import nn
-from robofin.pointcloud.torch import FrankaSampler, FrankaCollisionSampler
 import pytorch_lightning as pl
 from pointnet2_ops.pointnet2_modules import PointnetSAModule
-
-from mpinets import loss
 from mpinets.utils import unnormalize_franka_joints
 from mpinets.geometry import TorchCuboids, TorchCylinders
-from typing import List, Tuple, Sequence, Dict, Callable
+from typing import List, Tuple, Sequence, Dict, Callable, Optional
 
 
-class MotionPolicyNetwork(pl.LightningModule):
-    """
-    The architecture laid out here is the default architecture laid out in the
-    Motion Policy Networks paper (Fishman, et. al, 2022).
-    """
-
-    def __init__(self):
-        """
-        Constructs the model
-        """
+# Add time embedding (similar to your PiZero)
+class SinusoidalPosEmb(nn.Module):
+    def __init__(self, dim, max_period=10000):
         super().__init__()
+        self.dim = dim
+        self.max_period = max_period
+
+    def forward(self, x):
+        device = x.device
+        half_dim = self.dim // 2
+        freqs = torch.exp(
+            -torch.log(torch.tensor(self.max_period, device=device))
+            * torch.arange(0, half_dim, device=device)
+            / half_dim
+        )
+        args = x.unsqueeze(-1) * freqs.unsqueeze(0)
+        embedding = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+        if self.dim % 2:
+            embedding = torch.cat(
+                [embedding, torch.zeros_like(embedding[:, :1])], dim=-1
+            )
+        return embedding
+
+
+class FlowMatchingMotionPolicyNetwork(pl.LightningModule):
+    """
+    Motion Policy Network modified for flow matching training
+    """
+
+    def __init__(
+        self,
+        flow_sig_min: float = 0.001,
+        num_inference_steps: int = 10,
+        final_action_clip_value: Optional[float] = None,
+        learning_rate: float = 1e-4,
+        num_robot_points: int = 1024,  # Added for validation rollout
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+
+        # Original components
         self.point_cloud_encoder = MPiNetsPointNet()
         self.config_encoder = nn.Sequential(
             nn.Linear(7, 32),
@@ -56,7 +61,7 @@ class MotionPolicyNetwork(pl.LightningModule):
             nn.Linear(128, 64),
         )
         self.target_encoder = nn.Sequential(
-            nn.Linear(12, 32),  # 12 for pos + rotation matrix
+            nn.Linear(12, 32),
             nn.LeakyReLU(),
             nn.Linear(32, 64),
             nn.LeakyReLU(),
@@ -66,76 +71,170 @@ class MotionPolicyNetwork(pl.LightningModule):
             nn.LeakyReLU(),
             nn.Linear(128, 64),
         )
+
+        # Add action encoder for conditioning on noisy actions
+        self.action_encoder = nn.Sequential(
+            nn.Linear(7, 32),
+            nn.LeakyReLU(),
+            nn.Linear(32, 64),
+            nn.LeakyReLU(),
+            nn.Linear(64, 64),
+        )
+
+        # Time conditioning - add time embedding to the decoder input
+        self.time_embedding = SinusoidalPosEmb(64, max_period=10000)
+        self.time_proj = nn.Sequential(
+            nn.Linear(64, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, 64),
+        )
+
+        # Modified decoder to include time conditioning AND action conditioning
         self.decoder = nn.Sequential(
-            nn.Linear(1024 + 64 + 64, 512),
+            nn.Linear(1024 + 64 + 64 + 64 + 64, 512),  # +64 for time, +64 for action
             nn.LeakyReLU(),
             nn.Linear(512, 256),
             nn.LeakyReLU(),
             nn.Linear(256, 128),
             nn.LeakyReLU(),
-            nn.Linear(128, 7),
+            nn.Linear(128, 7),  # Predict velocity instead of displacement
         )
 
+        # For validation rollout
+        self.num_robot_points = num_robot_points
+        self.fk_sampler = None
+        self.collision_sampler = None
+
     def configure_optimizers(self):
-        """
-        A standard method in PyTorch lightning to set the optimizer
-        """
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
         return optimizer
 
-    def forward(self, xyz: torch.Tensor, q: torch.Tensor, target: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
-        """
-        Passes data through the network to produce an output
+    def psi_t(
+        self,
+        x: torch.FloatTensor,  # noise
+        x1: torch.FloatTensor,  # target action (displacement)
+        t: torch.FloatTensor,  # time
+    ) -> torch.FloatTensor:
+        """Conditional Flow - interpolates between noise and target"""
+        t = t[:, None]  # (B, 1) for broadcasting
+        return (1 - (1 - self.hparams.flow_sig_min) * t) * x + t * x1
 
-        :param xyz torch.Tensor: Tensor representing the point cloud. Should
-                                      have dimensions of [B x N x 4] where B is the batch
-                                      size, N is the number of points and 4 is because there
-                                      are three geometric dimensions and a segmentation mask
-        :param q torch.Tensor: The current robot configuration normalized to be between
-                                    -1 and 1, according to each joint's range of motion
-        :rtype torch.Tensor: The displacement to be applied to the current configuration to get
-                     the position at the next step (still in normalized space)
+    def forward(
+        self,
+        xyz: torch.Tensor,
+        q: torch.Tensor,
+        target: torch.Tensor,
+        t: torch.Tensor,
+        noisy_action: torch.Tensor,  # Now this is used!
+    ) -> torch.Tensor:
         """
+        Forward pass with flow matching
+
+        :param xyz: point cloud [B, N, 4]
+        :param q: current configuration [B, 7]
+        :param target: target pose [B, 12]
+        :param t: time [B]
+        :param noisy_action: noisy action [B, 7] - NOW USED!
+        :return: predicted velocity [B, 7]
+        """
+        # Get encodings
         pc_encoding = self.point_cloud_encoder(xyz)
         config_encoding = self.config_encoder(q)
         target_encoding = self.target_encoder(target)
-        x = torch.cat((pc_encoding, config_encoding, target_encoding), dim=1)
+
+        # Encode the noisy action (this is the key change!)
+        action_encoding = self.action_encoder(noisy_action)
+
+        # Time conditioning
+        time_emb = self.time_embedding(t)
+        time_encoding = self.time_proj(time_emb)
+
+        # Concatenate all features (including action encoding)
+        x = torch.cat(
+            (
+                pc_encoding,
+                config_encoding,
+                target_encoding,
+                time_encoding,
+                action_encoding,
+            ),
+            dim=1,
+        )
+
+        # Predict velocity
         return self.decoder(x)
 
+    def training_step(
+        self, batch: Dict[str, torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
+        """
+        Flow matching training step
+        """
+        xyz, q, target_pose, next_q = (
+            batch["xyz"],
+            batch["configuration"],
+            batch["target_pose"],
+            batch["supervision"],  # This should be the next configuration
+        )
 
-class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
-    """
-    An version of the MotionPolicyNetwork model that has additional attributes
-    necessary during training (or using the validation step outside of the
-    training process). This class is a valid model, but it's overkill when
-    doing real robot inference and, for example, point cloud sampling is
-    done by an outside process (such as downsampling point clouds from a point cloud).
-    """
+        # Calculate target displacement
+        target_displacement = next_q - q
 
-    def __init__(
+        # Sample time and noise
+        t = torch.rand(xyz.size(0), device=self.device)
+        x0 = torch.randn_like(target_displacement)  # noise
+
+        # Create noisy action (interpolated between noise and target)
+        psi_t = self.psi_t(x0, target_displacement, t)
+
+        # Predict velocity - now conditioning on the noisy action
+        v_pred = self(xyz, q, target_pose, t, psi_t)
+
+        # True velocity for flow matching
+        d_psi = target_displacement - (1 - self.hparams.flow_sig_min) * x0
+
+        # Flow matching loss
+        loss = torch.mean((v_pred - d_psi) ** 2)
+
+        self.log("train_loss", loss)
+        return loss
+
+    def infer_action(
         self,
-        num_robot_points: int,
-        point_match_loss_weight: float,
-        collision_loss_weight: float,
-    ):
+        xyz: torch.Tensor,
+        q: torch.Tensor,
+        target: torch.Tensor,
+        num_steps: Optional[int] = None,
+    ) -> torch.Tensor:
         """
-        Creates the network and assigns additional parameters for training
-
-
-        :param num_robot_points int: The number of robot points used when resampling
-                                     the robot points during rollouts (used in validation)
-        :param point_match_loss_weight float: The weight assigned to the behavior
-                                              cloning loss.
-        :param collision_loss_weight float: The weight assigned to the collision loss
-        :rtype Self: An instance of the network
+        Inference using Euler integration
         """
-        super().__init__()
-        self.num_robot_points = num_robot_points
-        self.point_match_loss_weight = point_match_loss_weight
-        self.collision_loss_weight = collision_loss_weight
-        self.fk_sampler = None
-        self.collision_sampler = None
-        self.loss_fun = loss.CollisionAndBCLossContainer()
+        if num_steps is None:
+            num_steps = self.hparams.num_inference_steps
+
+        # Start with noise
+        action = torch.randn_like(q)
+
+        delta_t = 1.0 / num_steps
+        t = torch.zeros(xyz.size(0), device=self.device)
+
+        for _ in range(num_steps):
+            # Predict velocity at current time and noisy action
+            velocity = self(xyz, q, target, t, action)
+
+            # Euler step
+            action = action + delta_t * velocity
+            t = t + delta_t
+
+        # Clamp if specified
+        if self.hparams.final_action_clip_value is not None:
+            action = torch.clamp(
+                action,
+                -self.hparams.final_action_clip_value,
+                self.hparams.final_action_clip_value,
+            )
+
+        return action
 
     def rollout(
         self,
@@ -159,14 +258,12 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         :rtype List[torch.Tensor]: The entire trajectory batch, i.e. a list of
                                    configuration batches including the starting
                                    configurations where each element in the list
-                                   corresponds to a timestep. For example, the
-                                   first element of each batch in the list would
-                                   be a single trajectory.
+                                   corresponds to a timestep.
         """
         xyz, q, target_pose = (
             batch["xyz"],
             batch["configuration"],
-            batch["target_pose"]
+            batch["target_pose"],
         )
         # This block is to adapt for the case where we only want to roll out a
         # single trajectory
@@ -181,7 +278,10 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             trajectory = [q]
 
         for i in range(rollout_length):
-            q = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
+            # Use flow matching inference instead of direct forward pass
+            displacement = self.infer_action(xyz, q, target_pose)
+            q = torch.clamp(q + displacement, min=-1, max=1)
+
             q_unnorm = unnormalize_franka_joints(q)
             assert isinstance(q_unnorm, torch.Tensor)
             q_unnorm = q_unnorm.type_as(q)
@@ -195,65 +295,6 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
 
         return trajectory
 
-    def training_step(  # type: ignore[override]
-        self, batch: Dict[str, torch.Tensor], batch_idx: int
-    ) -> torch.Tensor:
-        """
-        A function called automatically by Pytorch Lightning during training.
-        This function handles the forward pass, the loss calculation, and what to log
-
-        :param batch Dict[str, torch.Tensor]: A data batch coming from the
-                                                   data loader--should already be
-                                                   on the correct device
-        :param batch_idx int: The index of the batch (not used by this function)
-        :rtype torch.Tensor: The overall weighted loss (used for backprop)
-        """
-        xyz, q, target_pose = (
-            batch["xyz"],
-            batch["configuration"],
-            batch["target_pose"]
-        )
-        y_hat = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
-        
-        (
-            cuboid_centers,
-            cuboid_dims,
-            cuboid_quats,
-            cylinder_centers,
-            cylinder_radii,
-            cylinder_heights,
-            cylinder_quats,
-            supervision,
-        ) = (
-            batch["cuboid_centers"],
-            batch["cuboid_dims"],
-            batch["cuboid_quats"],
-            batch["cylinder_centers"],
-            batch["cylinder_radii"],
-            batch["cylinder_heights"],
-            batch["cylinder_quats"],
-            batch["supervision"],
-        )
-        collision_loss, point_match_loss = self.loss_fun(
-            y_hat,
-            cuboid_centers,
-            cuboid_dims,
-            cuboid_quats,
-            cylinder_centers,
-            cylinder_radii,
-            cylinder_heights,
-            cylinder_quats,
-            supervision,
-        )
-        self.log("point_match_loss", point_match_loss)
-        self.log("collision_loss", collision_loss)
-        train_loss = (
-            self.point_match_loss_weight * point_match_loss
-            + self.collision_loss_weight * collision_loss
-        )
-        self.log("train_loss", train_loss)
-        return train_loss
-
     def sample(self, q: torch.Tensor) -> torch.Tensor:
         """
         Samples a point cloud from the surface of all the robot's links
@@ -264,35 +305,36 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         assert self.fk_sampler is not None
         return self.fk_sampler.sample(q, self.num_robot_points)
 
-    def validation_step(  # type: ignore[override]
+    def validation_step(
         self, batch: Dict[str, torch.Tensor], batch_idx: int
-    ) -> torch.Tensor:
+    ) -> Dict[str, torch.Tensor]:
         """
-        This is a Pytorch Lightning function run automatically across devices
-        during the validation loop
-
-        :param batch Dict[str, torch.Tensor]: The batch coming from the dataloader
-        :param batch_idx int: The index of the batch (not used by this function)
-        :rtype torch.Tensor: The loss values which are to be collected into summary stats
+        Validation with rollout and collision checking
         """
-
-        # These are defined here because they need to be set on the correct devices.
-        # The easiest way to do this is to do it at call-time
+        # Initialize samplers if needed
         if self.fk_sampler is None:
+            from robofin.pointcloud.torch import FrankaSampler, FrankaCollisionSampler
+
             self.fk_sampler = FrankaSampler(self.device, use_cache=True)
         if self.collision_sampler is None:
+            from robofin.pointcloud.torch import FrankaSampler, FrankaCollisionSampler
+
             self.collision_sampler = FrankaCollisionSampler(
                 self.device, with_base_link=False
             )
+
+        # Perform rollout
         rollout = self.rollout(batch, 69, self.sample, unnormalize=True)
 
-        assert self.fk_sampler is not None  # Necessary for mypy to type properly
+        # Calculate target error
+        assert self.fk_sampler is not None
         eff = self.fk_sampler.end_effector_pose(rollout[-1])
         position_error = torch.linalg.vector_norm(
             eff[:, :3, -1] - batch["target_position"], dim=1
         )
         avg_target_error = torch.mean(position_error)
 
+        # Calculate collision rate
         cuboids = TorchCuboids(
             batch["cuboid_centers"],
             batch["cuboid_dims"],
@@ -306,13 +348,14 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         )
 
         B = batch["cuboid_centers"].size(0)
-        rollout = torch.stack(rollout, dim=1)
-        # Here is some Pytorch broadcasting voodoo to calculate whether each
-        # rollout has a collision or not (looking to calculate the collision rate)
-        assert rollout.shape == (B, 70, 7)
-        rollout = rollout.reshape(-1, 7)
+        rollout_tensor = torch.stack(rollout, dim=1)
+
+        # Check for collisions in the rollout
+        assert rollout_tensor.shape == (B, 70, 7)
+        rollout_flat = rollout_tensor.reshape(-1, 7)
         has_collision = torch.zeros(B, dtype=torch.bool, device=self.device)
-        collision_spheres = self.collision_sampler.compute_spheres(rollout)
+
+        collision_spheres = self.collision_sampler.compute_spheres(rollout_flat)
         for radius, spheres in collision_spheres:
             num_spheres = spheres.shape[-2]
             sphere_sequence = spheres.reshape((B, -1, num_spheres, 3))
@@ -327,44 +370,39 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             has_collision = torch.logical_or(radius_collisions, has_collision)
 
         avg_collision_rate = torch.count_nonzero(has_collision) / B
+
         return {
             "avg_target_error": avg_target_error,
             "avg_collision_rate": avg_collision_rate,
         }
 
-    def validation_step_end(  # type: ignore[override]
+    def validation_step_end(
         self, batch_parts: Dict[str, torch.Tensor]
     ) -> Dict[str, torch.Tensor]:
         """
         Called by Pytorch Lightning at the end of each validation step to
         aggregate across devices
-
-        :param batch_parts Dict[str, torch.Tensor]: The parts accumulated from all devices
-        :rtype Dict[str, torch.Tensor]: The average values across the devices
         """
         return {
             "avg_target_error": torch.mean(batch_parts["avg_target_error"]),
             "avg_collision_rate": torch.mean(batch_parts["avg_collision_rate"]),
         }
 
-    def validation_epoch_end(  # type: ignore[override]
+    def validation_epoch_end(
         self, validation_step_outputs: Sequence[Dict[str, torch.Tensor]]
     ):
         """
         Pytorch lightning method that aggregates stats from the validation loop and logs
-
-        :param validation_step_outputs Sequence[Dict[str, torch.Tensor]]: The outputs from each
-                                                                      validation step
         """
         avg_target_error = torch.mean(
             torch.stack([x["avg_target_error"] for x in validation_step_outputs])
         )
-        self.log("avg_target_error", avg_target_error)
+        self.log("val_avg_target_error", avg_target_error)
 
         avg_collision_rate = torch.mean(
             torch.stack([x["avg_collision_rate"] for x in validation_step_outputs])
         )
-        self.log("avg_collision_rate", avg_collision_rate)
+        self.log("val_avg_collision_rate", avg_collision_rate)
 
 
 class MPiNetsPointNet(pl.LightningModule):
@@ -415,11 +453,9 @@ class MPiNetsPointNet(pl.LightningModule):
             nn.Linear(512, 2048),
             nn.GroupNorm(16, 2048),
             nn.LeakyReLU(inplace=True),
-
             nn.Linear(2048, 1024),
             nn.GroupNorm(16, 1024),
             nn.LeakyReLU(inplace=True),
-
             nn.Linear(1024, 1024),
         )
 
@@ -436,4 +472,3 @@ class MPiNetsPointNet(pl.LightningModule):
             xyz, features = module(xyz, features)
         # features: [B, C, 1]  → squeeze → [B, C]
         return self.fc_layer(features.squeeze(-1))
-
