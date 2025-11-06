@@ -4,7 +4,7 @@ training_model_parameters:
     flow_sig_min: 0.001
     num_inference_steps: 10
     final_action_clip_value: null
-    learning_rate: 1e-4
+    learning_rate: 0.0001
 
 data_module_parameters:
   data_dir: /data/cabinet_6k
@@ -18,7 +18,7 @@ shared_parameters:
 model_path: null
 checkpoint_interval: 10
 validation_interval: 3000
-gpus: 6 # If > 1, will use DDP for training.
+gpus: 1 # If > 1, will use DDP for training.
 batch_size: 32
 save_checkpoint_dir: /workspace/pretrain_flow_matching_cabinet_6k
 experiment_name: pretrain_flow_matching_cabinet_6k
