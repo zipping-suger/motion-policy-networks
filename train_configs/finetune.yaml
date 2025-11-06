@@ -2,7 +2,7 @@ train_mode: "finetune"
 
 training_model_parameters:
     goal_loss_weight: 1
-    collision_loss_weight: 10
+    collision_loss_weight: 5
 
 data_module_parameters:
   data_dir: /data/mpinets_hybrid_training_data
@@ -19,7 +19,7 @@ checkpoint_interval: 10
 validation_interval: 10
 gpus: 6 # If > 1, will use DDP for training.
 batch_size: 32
-save_checkpoint_dir: /workspace/finetune_small_mpinets_hybrid_training_data_self_collision
+save_checkpoint_dir: /workspace/finetune_small_mpinets_hybrid_training_data_ultimate
 max_epochs: 50
-experiment_name: finetune_mpinets_hybrid_training_data_self_collision
-description: "Finetuning pretrained_on_small on hybrid training data with self-collision loss"
+experiment_name: finetune_mpinets_hybrid_training_data_ultimate
+description: "Finetuning small on full MpiNet hybrid training data"
