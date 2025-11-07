@@ -1,25 +1,3 @@
-# MIT License
-#
-# Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES, University of Washington. All rights reserved.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a
-# copy of this software and associated documentation files (the "Software"),
-# to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,
-# and/or sell copies of the Software, and to permit persons to whom the
-# Software is furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-# DEALINGS IN THE SOFTWARE.
-
 from pathlib import Path
 from typing import Optional, List, Union, Dict
 import enum
@@ -47,8 +25,8 @@ class DatasetType(enum.Enum):
     TRAIN = 0
     VAL = 1
     TEST = 2
-    
-    
+
+
 class TaskDataset(Dataset):
 
     def __init__(
@@ -80,8 +58,8 @@ class TaskDataset(Dataset):
         self.random_scale = random_scale
         self.fk_sampler = FrankaSampler("cpu", use_cache=True)
         with h5py.File(str(self._database), "r") as f:
-            self._length = f['target_poses'].shape[0]
-        
+            self._length = f["target_poses"].shape[0]
+
     def __len__(self):
         """
         Necessary for Pytorch. For this dataset, the length is the total number
@@ -120,13 +98,13 @@ class TaskDataset(Dataset):
         :param configuration_tensor torch.Tensor: The input tensor. Has dim [7]
         """
         return utils.normalize_franka_joints(configuration_tensor)
-    
+
     def _construct_pointcloud(self, robot_points, obstacle_points, target_points):
         """
         Construct the point cloud with features as shown in the example.
         """
         obstacle_points = torch.as_tensor(obstacle_points[:, :3]).float()
-        
+
         xyz = torch.cat(
             (
                 torch.zeros(self.num_robot_points, 4),
@@ -135,13 +113,17 @@ class TaskDataset(Dataset):
             ),
             dim=0,
         )
-        
-        xyz[:self.num_robot_points, :3] = robot_points.float()
-        xyz[self.num_robot_points:self.num_robot_points+self.num_obstacle_points, :3] = obstacle_points
-        xyz[self.num_robot_points+self.num_obstacle_points:, :3] = target_points.float()
-        
+
+        xyz[: self.num_robot_points, :3] = robot_points.float()
+        xyz[
+            self.num_robot_points : self.num_robot_points + self.num_obstacle_points, :3
+        ] = obstacle_points
+        xyz[self.num_robot_points + self.num_obstacle_points :, :3] = (
+            target_points.float()
+        )
+
         return xyz
-    
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
         Required by Pytorch. Queries for data at a particular index. Note that
@@ -151,33 +133,37 @@ class TaskDataset(Dataset):
         :rtype Dict[str, torch.Tensor]: Returns a dictionary that can be assembled
             by the data loader before using in training.
         """
-        
+
         item = {}
         with h5py.File(str(self._database), "r") as f:
             # Target
-            target_config = f['target_configs'][idx]              
-            target_pose = FrankaRealRobot.fk(
-                target_config
-            )
-            
-            target_pose_matrix = target_pose.matrix            
-    
+            target_config = f["target_configs"][idx]
+            target_pose = FrankaRealRobot.fk(target_config)
+
+            target_pose_matrix = target_pose.matrix
+
             target_points = self.fk_sampler.sample_end_effector(
                 torch.as_tensor(target_pose_matrix).float(),
                 num_points=self.num_target_points,
             )
-            
-            target_position = torch.as_tensor(target_pose_matrix[:3, 3], dtype=torch.float32)
-            
+
+            target_position = torch.as_tensor(
+                target_pose_matrix[:3, 3], dtype=torch.float32
+            )
+
             # Use rotation matrix R9 as rotation representation
-            target_rot_mat = torch.as_tensor(target_pose.matrix[:3, :3].flatten(), dtype=torch.float32)
+            target_rot_mat = torch.as_tensor(
+                target_pose.matrix[:3, :3].flatten(), dtype=torch.float32
+            )
             item["target_position"] = target_position
             item["target_rotation"] = target_rot_mat
-            item["target_pose"] = torch.cat((target_position, target_rot_mat), dim=0).float()
+            item["target_pose"] = torch.cat(
+                (target_position, target_rot_mat), dim=0
+            ).float()
             item["target_configuration"] = torch.as_tensor(target_config).float()
-            
+
             # Start configuration
-            start_config = f['start_configs'][idx]
+            start_config = f["start_configs"][idx]
             config_tensor = torch.as_tensor(start_config).float()
 
             if self.train:
@@ -271,7 +257,9 @@ class TaskDataset(Dataset):
             obstacle_points = construct_mixed_point_cloud(
                 cuboids + cylinders, self.num_obstacle_points
             )
-            item["xyz"] = self._construct_pointcloud(robot_points, obstacle_points, target_points)
+            item["xyz"] = self._construct_pointcloud(
+                robot_points, obstacle_points, target_points
+            )
         return item
 
 
@@ -301,6 +289,7 @@ class PointCloudBase(Dataset):
         num_target_points: int,
         dataset_type: DatasetType,
         random_scale: float,
+        action_chunk_length: int = 1,  # NEW: Add action_chunk_length parameter
     ):
         """
         :param directory Path: The path to the root of the data directory
@@ -312,6 +301,7 @@ class PointCloudBase(Dataset):
         :param random_scale float: The standard deviation of the random normal
                                    noise to apply to the joints during training.
                                    This is only used for train datasets.
+        :param action_chunk_length int: Number of consecutive actions to predict (default: 1)
         """
         self._init_directory(directory, dataset_type)
         self.trajectory_key = trajectory_key
@@ -324,6 +314,7 @@ class PointCloudBase(Dataset):
         self.num_robot_points = num_robot_points
         self.num_target_points = num_target_points
         self.random_scale = random_scale
+        self.action_chunk_length = action_chunk_length  # NEW: Store action_chunk_length
         self.fk_sampler = FrankaSampler("cpu", use_cache=True)
 
     def _init_directory(self, directory: Path, dataset_type: DatasetType):
@@ -385,13 +376,17 @@ class PointCloudBase(Dataset):
                 torch.as_tensor(target_pose.matrix).float(),
                 num_points=self.num_target_points,
             )
-            
+
             target_position = torch.as_tensor(target_pose.xyz).float()
             # Use rotation matrix R9 as rotation representation
-            target_rot_mat = torch.as_tensor(target_pose.matrix[:3, :3].flatten(), dtype=torch.float32)
+            target_rot_mat = torch.as_tensor(
+                target_pose.matrix[:3, :3].flatten(), dtype=torch.float32
+            )
             item["target_position"] = target_position
             item["target_rotation"] = target_rot_mat
-            item["target_pose"] = torch.cat((target_position, target_rot_mat), dim=0).float()
+            item["target_pose"] = torch.cat(
+                (target_position, target_rot_mat), dim=0
+            ).float()
 
             config = f[self.trajectory_key][trajectory_idx, timestep, :]
             config_tensor = torch.as_tensor(config).float()
@@ -530,6 +525,7 @@ class PointCloudTrajectoryDataset(PointCloudBase):
         num_target_points: int,
         dataset_type: DatasetType,
         random_scale: float,
+        action_chunk_length: int = 1,  # NEW: Add action_chunk_length parameter
     ):
         """
         :param directory Path: The path to the root of the data directory
@@ -547,6 +543,7 @@ class PointCloudTrajectoryDataset(PointCloudBase):
             num_target_points,
             dataset_type,
             random_scale,
+            action_chunk_length,  # NEW: Pass action_chunk_length to parent
         )
 
     def __len__(self):
@@ -587,6 +584,7 @@ class PointCloudInstanceDataset(PointCloudBase):
         num_target_points: int,
         dataset_type: DatasetType,
         random_scale: float,
+        action_chunk_length: int = 1,  # NEW: Add action_chunk_length parameter
     ):
         """
         :param directory Path: The path to the root of the data directory
@@ -598,6 +596,7 @@ class PointCloudInstanceDataset(PointCloudBase):
         :param random_scale float: The standard deviation of the random normal
                                    noise to apply to the joints during training.
                                    This is only used for train datasets.
+        :param action_chunk_length int: Number of consecutive actions to predict (default: 1)
         """
         super().__init__(
             directory,
@@ -607,6 +606,7 @@ class PointCloudInstanceDataset(PointCloudBase):
             num_target_points,
             dataset_type,
             random_scale,
+            action_chunk_length,  # NEW: Pass action_chunk_length to parent
         )
 
     def __len__(self):
@@ -630,27 +630,39 @@ class PointCloudInstanceDataset(PointCloudBase):
             timestep = self.expert_length - 1
         item = self.get_inputs(trajectory_idx, timestep)
 
-        # Re-use the last point in the trajectory at the end
-        supervision_timestep = np.clip(
-            timestep + 1,
-            0,
-            self.expert_length - 1,
-        )
+        # NEW: Get multiple future actions for action chunking
+        supervision_timesteps = []
+        for i in range(self.action_chunk_length):
+            supervision_timestep = np.clip(
+                timestep + 1 + i,
+                0,
+                self.expert_length - 1,
+            )
+            supervision_timesteps.append(supervision_timestep)
 
         with h5py.File(str(self._database), "r") as f:
-            supervision = self.normalize(
-                torch.as_tensor(
-                    f[self.trajectory_key][trajectory_idx, supervision_timestep, :]
-                )
-            ).float()
-            if torch.any(supervision < -1) or torch.any(supervision > 1):
-                print("Supervision out of bounds:", supervision)
-            supervision = torch.clamp(supervision, -1, 1)
-            item["supervision"] = supervision
+            # NEW: Get multiple supervision actions for action chunking
+            supervision_configs = []
+            for supervision_timestep in supervision_timesteps:
+                supervision_config = self.normalize(
+                    torch.as_tensor(
+                        f[self.trajectory_key][trajectory_idx, supervision_timestep, :]
+                    )
+                ).float()
+                if torch.any(supervision_config < -1) or torch.any(
+                    supervision_config > 1
+                ):
+                    print("Supervision out of bounds:", supervision_config)
+                supervision_config = torch.clamp(supervision_config, -1, 1)
+                supervision_configs.append(supervision_config)
+
+            # Stack all supervision actions into a single tensor
+            item["supervision"] = torch.stack(supervision_configs, dim=0)
 
         return item
 
 
+# In the DataModule class, update the __init__ method:
 class DataModule(pl.LightningDataModule):
     def __init__(
         self,
@@ -662,6 +674,8 @@ class DataModule(pl.LightningDataModule):
         random_scale: float,
         batch_size: int,
         train_mode: str,
+        action_chunk_length: int = 1,  # Add default value
+        num_workers: int = 16,
     ):
         """
         :param data_dir str: The directory with the data. Directory structure should
@@ -674,6 +688,8 @@ class DataModule(pl.LightningDataModule):
         :param random_scale float: The standard deviation of the random normal
                                    noise to apply to the joints during training.
         :param batch_size int: The batch size
+        :param action_chunk_length int: Number of consecutive actions to predict (default: 1)
+        :param num_workers int: Number of workers for data loading (default: 16)
         """
         super().__init__()
         self.data_dir = Path(data_dir)
@@ -682,9 +698,10 @@ class DataModule(pl.LightningDataModule):
         self.num_robot_points = num_robot_points
         self.num_obstacle_points = num_obstacle_points
         self.num_target_points = num_target_points
-        self.num_workers = 16 
+        self.num_workers = num_workers
         self.random_scale = random_scale
         self.train_mode = train_mode
+        self.action_chunk_length = action_chunk_length
 
     def setup(self, stage: Optional[str] = None):
         """
@@ -705,6 +722,7 @@ class DataModule(pl.LightningDataModule):
                     self.num_target_points,
                     dataset_type=DatasetType.TRAIN,
                     random_scale=self.random_scale,
+                    action_chunk_length=self.action_chunk_length,  # Pass action_chunk_length
                 )
             elif self.train_mode == "finetune":
                 # Use PointCloudTrajectoryDataset for fine-tuning (optimization)
@@ -716,9 +734,10 @@ class DataModule(pl.LightningDataModule):
                     self.num_target_points,
                     dataset_type=DatasetType.TRAIN,
                     random_scale=self.random_scale,
+                    action_chunk_length=self.action_chunk_length,  # Pass action_chunk_length
                 )
             elif self.train_mode == "finetune_tasks":
-                # Use ProblemDataset for fine-tuning tasks
+                # Use TaskDataset for fine-tuning tasks
                 self.data_train = TaskDataset(
                     self.data_dir,
                     self.trajectory_key,
@@ -729,8 +748,10 @@ class DataModule(pl.LightningDataModule):
                     random_scale=self.random_scale,
                 )
             else:
-                raise ValueError(f"Unknown training mode: {self.train_mode}. Expected 'pretrain' or 'finetune'.")
-            
+                raise ValueError(
+                    f"Unknown training mode: {self.train_mode}. Expected 'pretrain', 'finetune', or 'finetune_tasks'."
+                )
+
             if self.train_mode in ["pretrain", "finetune"]:
                 self.data_val = PointCloudTrajectoryDataset(
                     self.data_dir,
@@ -740,6 +761,7 @@ class DataModule(pl.LightningDataModule):
                     self.num_target_points,
                     dataset_type=DatasetType.VAL,
                     random_scale=0.0,  # No random scale for validation
+                    action_chunk_length=self.action_chunk_length,  # Pass action_chunk_length
                 )
             elif self.train_mode == "finetune_tasks":
                 self.data_val = TaskDataset(
@@ -751,55 +773,14 @@ class DataModule(pl.LightningDataModule):
                     dataset_type=DatasetType.VAL,
                     random_scale=0.0,  # No random scale for validation
                 )
-            else:
-                raise ValueError(f"Unknown training mode: {self.train_mode}. Expected 'pretrain', 'finetune', or 'finetune_tasks'.")
         if stage == "test" or stage is None:
             self.data_test = PointCloudInstanceDataset(
                 self.data_dir,
                 self.trajectory_key,
                 self.num_robot_points,
                 self.num_obstacle_points,
+                self.num_target_points,
                 dataset_type=DatasetType.TEST,
                 random_scale=self.random_scale,
+                action_chunk_length=self.action_chunk_length,  # Pass action_chunk_length
             )
-
-    def train_dataloader(self) -> DataLoader:
-        """
-        A Pytorch lightning method to get the dataloader for training
-
-        :rtype DataLoader: The training dataloader
-        """
-        return DataLoader(
-            self.data_train,
-            self.batch_size,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            shuffle=True,  # shuffle the training data
-        )
-
-    def val_dataloader(self) -> DataLoader:
-        """
-        A Pytorch lightning method to get the dataloader for validation
-
-        :rtype DataLoader: The validation dataloader
-        """
-        return DataLoader(
-            self.data_val,
-            self.batch_size,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
-
-    def test_dataloader(self) -> DataLoader:
-        """
-        A Pytorch lightning method to get the dataloader for testing
-
-        :rtype DataLoader: The dataloader for testing
-        """
-        return DataLoader(
-            self.data_test,
-            self.batch_size,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
-

@@ -3,6 +3,11 @@ train_mode: "pretrain"
 training_model_parameters:
     point_match_loss_weight: 1
     collision_loss_weight: 5
+    collision_loss_margin: 0.03  # NEW: Add collision loss margin
+    min_lr: 1e-6  # NEW: Learning rate scheduling
+    max_lr: 1e-4
+    warmup_steps: 1000
+    decay_rate: 0.95
 
 data_module_parameters:
   data_dir: /data/mpinets_hybrid_training_data
@@ -12,6 +17,7 @@ data_module_parameters:
   random_scale: 0.015
 shared_parameters:
     num_robot_points: 2048
+    action_chunk_length: 3  # NEW: Add action_chunk_length parameter
 
 model_path: null
 checkpoint_interval: 10

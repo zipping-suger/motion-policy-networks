@@ -28,7 +28,9 @@ import torch
 from robofin.pointcloud.torch import FrankaSampler
 
 
-def point_match_loss(input_pc: torch.Tensor, target_pc: torch.Tensor) -> torch.Tensor:
+def point_match_loss(
+    input_pc: torch.Tensor, target_pc: torch.Tensor, reduction: str = "mean"
+) -> torch.Tensor:
     """
     A combination L1 and L2 loss to penalize large and small deviations between
     two point clouds
@@ -37,10 +39,11 @@ def point_match_loss(input_pc: torch.Tensor, target_pc: torch.Tensor) -> torch.T
                                   Has dim [B, N, 3]
     :param target_pc torch.Tensor: Point cloud sampled from the supervision
                                    Has dim [B, N, 3]
+    :param reduction str: Reduction method for the loss
     :rtype torch.Tensor: The single loss value
     """
-    return F.mse_loss(input_pc, target_pc, reduction="mean") + F.l1_loss(
-        input_pc, target_pc, reduction="mean"
+    return F.mse_loss(input_pc, target_pc, reduction=reduction) + F.l1_loss(
+        input_pc, target_pc, reduction=reduction
     )
 
 
@@ -53,6 +56,8 @@ def collision_loss(
     cylinder_radii: torch.Tensor,
     cylinder_heights: torch.Tensor,
     cylinder_quaternions: torch.Tensor,
+    margin: float = 0.03,  # NEW: Make margin configurable
+    reduction: str = "mean",  # NEW: Add reduction parameter
 ) -> torch.Tensor:
     """
     Calculates the hinge loss, calculating whether the robot (represented as a
@@ -71,6 +76,8 @@ def collision_loss(
     :param cylinder_radii torch.Tensor: Has dim [B, M2, 1]
     :param cylinder_heights torch.Tensor: Has dim [B, M2, 1]
     :param cylinder_quaternions torch.Tensor: Has dim [B, M2, 4]. Quaternion is formatted as w, x, y, z.
+    :param margin float: The margin for the hinge loss
+    :param reduction str: Reduction method for the loss
     :rtype torch.Tensor: Returns the loss value aggregated over the batch
     """
 
@@ -89,8 +96,8 @@ def collision_loss(
     return F.hinge_embedding_loss(
         sdf_values,
         -torch.ones_like(sdf_values),
-        margin=0.03,
-        reduction="mean",
+        margin=margin,
+        reduction=reduction,
     )
 
 
@@ -104,9 +111,11 @@ class CollisionAndBCLossContainer:
 
     def __init__(
         self,
+        collision_loss_margin: float = 0.03,  # NEW: Make margin configurable
     ):
         self.fk_sampler = None
         self.num_points = 1024
+        self.collision_loss_margin = collision_loss_margin  # NEW: Store margin
 
     def __call__(
         self,
@@ -161,14 +170,14 @@ class CollisionAndBCLossContainer:
                 cylinder_radii,
                 cylinder_heights,
                 cylinder_quaternions,
+                margin=self.collision_loss_margin,  # NEW: Use configurable margin
             ),
             point_match_loss(input_pc, target_pc),
         )
 
 
 def compute_pose_loss_rotmat(
-    pred_pose: torch.Tensor,
-    target_pose: torch.Tensor
+    pred_pose: torch.Tensor, target_pose: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Computes position and rotation loss between predicted and target end-effector poses.
@@ -187,7 +196,7 @@ def compute_pose_loss_rotmat(
 
     # Extract predicted rotation and translation
     pred_rot = pred_pose[:, :3, :3]  # (B, 3, 3)
-    pred_pos = pred_pose[:, :3, 3]   # (B, 3)
+    pred_pos = pred_pose[:, :3, 3]  # (B, 3)
 
     # Position loss (squared Euclidean distance)
     position_loss = torch.sum((pred_pos - target_pos) ** 2, dim=1)  # (B,)

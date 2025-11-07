@@ -151,6 +151,7 @@ def parse_args_and_configuration():
     }
 
 
+# In the run function, update model initialization:
 def run():
     """
     Runs the training procedure
@@ -174,23 +175,25 @@ def run():
         checkpoint_dir=config["save_checkpoint_dir"],
         validation_interval=config["validation_interval"],
     )
+
+    # NEW: Extract action_chunk_length from config with default value
+    action_chunk_length = config.get("action_chunk_length", 1)
+
     dm = DataModule(
         batch_size=config["batch_size"],
         train_mode=config["train_mode"],
+        action_chunk_length=action_chunk_length,  # NEW: Pass action_chunk_length
         **(config["shared_parameters"] or {}),
         **(config["data_module_parameters"] or {}),
     )
     mode = config["train_mode"]
     TrainingPolicyNet = import_training_policy_net(mode)
-    
+
     # Initialize the model
-    mdl = TrainingPolicyNet(
-        **(config["shared_parameters"] or {}),
-        **(config["training_model_parameters"] or {}),
-    )
     if config["model_path"] is None:
         print("Training from scratch")
         mdl = TrainingPolicyNet(
+            action_chunk_length=action_chunk_length,  # NEW: Pass action_chunk_length
             **(config["shared_parameters"] or {}),
             **(config["training_model_parameters"] or {}),
         )
@@ -198,6 +201,7 @@ def run():
         print(f"Loading model from {config['model_path']}")
         mdl = TrainingPolicyNet.load_from_checkpoint(
             config["model_path"],
+            action_chunk_length=action_chunk_length,  # NEW: Pass action_chunk_length
             **(config["shared_parameters"] or {}),
             **(config["training_model_parameters"] or {}),
         )
