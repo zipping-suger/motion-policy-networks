@@ -7,7 +7,6 @@ from mpinets.geometry import TorchCuboids, TorchCylinders
 from typing import List, Tuple, Sequence, Dict, Callable, Optional
 
 
-# Add time embedding (similar to your PiZero)
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim, max_period=10000):
         super().__init__()
@@ -42,17 +41,25 @@ class FlowMatchingMotionPolicyNetwork(pl.LightningModule):
         num_inference_steps: int = 10,
         final_action_clip_value: Optional[float] = None,
         learning_rate: float = 1e-4,
-        num_robot_points: int = 1024,  # Added for validation rollout
+        num_robot_points: int = 1024,
+        flow_sampling: str = "beta",  # NEW: Add flow_sampling parameter
+        flow_alpha: float = 1.5,  # NEW: Beta distribution parameters
+        flow_beta: float = 1.0,  # NEW: Beta distribution parameters
     ):
         super().__init__()
         self.save_hyperparameters()
+
+        # NEW: Initialize beta distribution for sampling
+        if flow_sampling == "beta":
+            self.flow_beta_dist = torch.distributions.Beta(flow_alpha, flow_beta)
+            self.flow_t_max = 1 - flow_sig_min
 
         self.register_buffer(
             "displacement_std",
             torch.tensor([0.01] * 7),
         )
 
-        # Original components
+        # Original components remain the same...
         self.point_cloud_encoder = MPiNetsPointNet()
         self.config_encoder = nn.Sequential(
             nn.Linear(7, 32),
@@ -77,7 +84,6 @@ class FlowMatchingMotionPolicyNetwork(pl.LightningModule):
             nn.Linear(128, 64),
         )
 
-        # Add action encoder for conditioning on noisy actions
         self.action_encoder = nn.Sequential(
             nn.Linear(7, 32),
             nn.LeakyReLU(),
@@ -86,7 +92,6 @@ class FlowMatchingMotionPolicyNetwork(pl.LightningModule):
             nn.Linear(64, 64),
         )
 
-        # Time conditioning - add time embedding to the decoder input
         self.time_embedding = SinusoidalPosEmb(64, max_period=10000)
         self.time_proj = nn.Sequential(
             nn.Linear(64, 128),
@@ -94,31 +99,52 @@ class FlowMatchingMotionPolicyNetwork(pl.LightningModule):
             nn.Linear(128, 64),
         )
 
-        # Modified decoder to include time conditioning AND action conditioning
         self.decoder = nn.Sequential(
-            nn.Linear(1024 + 64 + 64 + 64 + 64, 512),  # +64 for time, +64 for action
+            nn.Linear(1024 + 64 + 64 + 64 + 64, 512),
             nn.LeakyReLU(),
             nn.Linear(512, 256),
             nn.LeakyReLU(),
             nn.Linear(256, 128),
             nn.LeakyReLU(),
-            nn.Linear(128, 7),  # Predict velocity instead of displacement
+            nn.Linear(128, 7),
         )
 
-        # For validation rollout
         self.num_robot_points = num_robot_points
         self.fk_sampler = None
         self.collision_sampler = None
 
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
-        return optimizer
+    def sample_fm_time(self, bsz: int) -> torch.FloatTensor:
+        """
+        Sample flow matching timesteps using the specified strategy
+
+        Args:
+            bsz: batch size
+
+        Returns:
+            t: timesteps of shape (bsz,)
+        """
+        if self.hparams.flow_sampling == "uniform":
+            # Stratified uniform sampling (like the example code)
+            eps = 1e-5
+            t = (
+                torch.rand(1, device=self.device)
+                + torch.arange(bsz, device=self.device) / bsz
+            ) % (1 - eps)
+        elif self.hparams.flow_sampling == "beta":
+            # Beta distribution sampling (like the example code)
+            z = self.flow_beta_dist.sample((bsz,)).to(self.device)
+            t = self.flow_t_max * (1 - z)  # flip and shift
+        else:
+            # Simple uniform (your original implementation)
+            t = torch.rand(bsz, device=self.device)
+
+        return t
 
     def psi_t(
         self,
-        x: torch.FloatTensor,  # noise
-        x1: torch.FloatTensor,  # target action (displacement)
-        t: torch.FloatTensor,  # time
+        x: torch.FloatTensor,
+        x1: torch.FloatTensor,
+        t: torch.FloatTensor,
     ) -> torch.FloatTensor:
         """Conditional Flow - interpolates between noise and target"""
         t = t[:, None]  # (B, 1) for broadcasting
@@ -130,31 +156,16 @@ class FlowMatchingMotionPolicyNetwork(pl.LightningModule):
         q: torch.Tensor,
         target: torch.Tensor,
         t: torch.Tensor,
-        noisy_action: torch.Tensor,  # Now this is used!
+        noisy_action: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Forward pass with flow matching
-
-        :param xyz: point cloud [B, N, 4]
-        :param q: current configuration [B, 7]
-        :param target: target pose [B, 12]
-        :param t: time [B]
-        :param noisy_action: noisy action [B, 7] - NOW USED!
-        :return: predicted velocity [B, 7]
-        """
-        # Get encodings
+        # ... rest of forward remains the same ...
         pc_encoding = self.point_cloud_encoder(xyz)
         config_encoding = self.config_encoder(q)
         target_encoding = self.target_encoder(target)
-
-        # Encode the noisy action (this is the key change!)
         action_encoding = self.action_encoder(noisy_action)
-
-        # Time conditioning
         time_emb = self.time_embedding(t)
         time_encoding = self.time_proj(time_emb)
 
-        # Concatenate all features (including action encoding)
         x = torch.cat(
             (
                 pc_encoding,
@@ -165,42 +176,33 @@ class FlowMatchingMotionPolicyNetwork(pl.LightningModule):
             ),
             dim=1,
         )
-
-        # Predict velocity
         return self.decoder(x)
 
     def training_step(
         self, batch: Dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
         """
-        Flow matching training step
+        Flow matching training step - MODIFIED to use sample_fm_time
         """
         xyz, q, target_pose, next_q = (
             batch["xyz"],
             batch["configuration"],
             batch["target_pose"],
-            batch["supervision"],  # This should be the next configuration
+            batch["supervision"],
         )
 
         # Calculate target displacement
         target_displacement = next_q - q
 
-        # Sample time and noise
-        t = torch.rand(xyz.size(0), device=self.device)
+        # MODIFIED: Use sample_fm_time instead of simple uniform
+        t = self.sample_fm_time(xyz.size(0))  # This is the key change!
+
         x0 = self.displacement_std * torch.randn_like(target_displacement)
-
-        # Create noisy action (interpolated between noise and target)
         psi_t = self.psi_t(x0, target_displacement, t)
-
-        # Predict velocity - now conditioning on the noisy action
         v_pred = self(xyz, q, target_pose, t, psi_t)
-
-        # True velocity for flow matching
         d_psi = target_displacement - (1 - self.hparams.flow_sig_min) * x0
 
-        # Flow matching loss
         loss = torch.mean((v_pred - d_psi) ** 2)
-
         self.log("train_loss", loss)
         return loss
 

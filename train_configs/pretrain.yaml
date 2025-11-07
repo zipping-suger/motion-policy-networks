@@ -5,21 +5,24 @@ training_model_parameters:
     num_inference_steps: 10
     final_action_clip_value: 0.05
     learning_rate: 0.0001
+    flow_sampling: "beta"  # NEW: Choose sampling strategy
+    flow_alpha: 1.5        # NEW: Beta distribution parameter
+    flow_beta: 1.0         # NEW: Beta distribution parameter
 
 data_module_parameters:
   data_dir: /data/cabinet_6k
-  trajectory_key: 'global_solutions' # Could also use 'global_solutions' for the global expert
+  trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
   random_scale: 0.0
 shared_parameters:
-    num_robot_points: 2048  # This will be passed to the model
+    num_robot_points: 2048
 
 model_path: null
 checkpoint_interval: 10
 validation_interval: 3000
-gpus: 1 # If > 1, will use DDP for training.
+gpus: 1
 batch_size: 32
-save_checkpoint_dir: /workspace/pretrain_flow_matching_cabinet_6k
-experiment_name: pretrain_flow_matching_cabinet_6k
-description: "pretrain on cabinet_6k with flow matching"
+save_checkpoint_dir: /workspace/pretrain_flow_matching_cabinet_6k_beta
+experiment_name: pretrain_flow_matching_cabinet_6k_beta
+description: "pretrain on cabinet_6k with flow matching using beta sampling"
