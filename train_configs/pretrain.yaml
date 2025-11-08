@@ -2,7 +2,7 @@ train_mode: "pretrain"
 
 training_model_parameters:
     flow_sig_min: 0.001
-    num_inference_steps: 10
+    num_inference_steps: 20
     final_action_clip_value: 0.05
     learning_rate: 0.0001
     flow_sampling: "uniform"  # NEW: Choose sampling strategy
