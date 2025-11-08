@@ -58,7 +58,7 @@ class FlowMatchingMotionPolicyNetwork(pl.LightningModule):
             "displacement_std",
             torch.tensor([0.01] * 7),
         )
-
+        
         # Original components remain the same...
         self.point_cloud_encoder = MPiNetsPointNet()
         self.config_encoder = nn.Sequential(
@@ -112,6 +112,16 @@ class FlowMatchingMotionPolicyNetwork(pl.LightningModule):
         self.num_robot_points = num_robot_points
         self.fk_sampler = None
         self.collision_sampler = None
+        
+    def configure_optimizers(self):
+        """
+        Configure the optimizer for training
+        """
+        optimizer = torch.optim.Adam(
+            self.parameters(), 
+            lr=self.hparams.learning_rate
+        )
+        return optimizer
 
     def sample_fm_time(self, bsz: int) -> torch.FloatTensor:
         """
