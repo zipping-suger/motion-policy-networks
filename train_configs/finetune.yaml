@@ -5,7 +5,7 @@ training_model_parameters:
     collision_loss_weight: 5
 
 data_module_parameters:
-  data_dir: /data/cabinet_1k
+  data_dir: /data/cabinet_10k
   trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
@@ -19,7 +19,7 @@ checkpoint_interval: 10
 validation_interval: 10
 gpus: 1 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/finetune_cabinet_1k
+save_checkpoint_dir: /workspace/finetune_cabinet_10k
 max_epochs: 50
-experiment_name: finetune_cabinet_1k
+experiment_name: finetune_cabinet_10k
 description: "Finetuning small on full MpiNet hybrid training data"
