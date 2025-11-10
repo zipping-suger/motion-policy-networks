@@ -85,8 +85,10 @@ class MotionPolicyNetwork(pl.LightningModule):
     def forward(
         self, xyz: torch.Tensor, q: torch.Tensor, target: torch.Tensor
     ) -> torch.Tensor:
-        # pc_encoding = self.point_cloud_encoder(xyz)
-        pc_encoding = checkpoint.checkpoint(self.point_cloud_encoder, xyz)
+        if self.fix_point_cloud_encoder:
+            pc_encoding = self.point_cloud_encoder(xyz)
+        else:
+            pc_encoding = checkpoint.checkpoint(self.point_cloud_encoder, xyz)
         config_encoding = self.config_encoder(q)
         target_encoding = self.target_encoder(target)
         x = torch.cat((pc_encoding, config_encoding, target_encoding), dim=1)
@@ -103,6 +105,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         use_self_collision: bool = False,
         smoothness_weight: float = 0.1, 
         use_smoothness_loss: bool = False,
+        fix_point_cloud_encoder: bool = False,
     ):
         super().__init__()
         self.num_robot_points = num_robot_points
@@ -114,11 +117,13 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         self.use_self_collision = use_self_collision
         self.smoothness_weight = smoothness_weight
         self.use_smoothness_loss = use_smoothness_loss
+        self.fix_point_cloud_encoder = fix_point_cloud_encoder
         self.validation_step_outputs = []
 
         # Update the point cloud encoder or not
-        for params in self.point_cloud_encoder.parameters():
-            params.requires_grad = True
+        if self.fix_point_cloud_encoder:
+            for params in self.point_cloud_encoder.parameters():
+                params.requires_grad = False
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
