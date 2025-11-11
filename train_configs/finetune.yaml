@@ -2,10 +2,10 @@ train_mode: "finetune"
 
 training_model_parameters:
     goal_loss_weight: 1
-    collision_loss_weight: 10
+    collision_loss_weight: 5
 
 data_module_parameters:
-  data_dir: /data/
+  data_dir: /data/cabinet_60k
   trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
@@ -14,12 +14,12 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: /workspace/pretrain_mpinets_hybrid_training_data/m67zonxm/last.ckpt
+model_path: /workspace/mpinets_finetune_mpinets_hybrid_training_data_small_hybrid_finetuned_on_small/sp2hrle1/epoch=14-step=17040.ckpt
 checkpoint_interval: 10
 validation_interval: 10
-gpus: 6 # If > 1, will use DDP for training.
+gpus: 2 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/full_mpinet_data_fixed_pc_encoder
+save_checkpoint_dir: /workspace/finetune_cabinet_60k
 max_epochs: 50
-experiment_name: full_mpinet_data_fixed_pc_encoder
-description: "Finetuning MPINets on full MPINets dataset with fixed point cloud encoder."
+experiment_name: finetune_cabinet_60k
+description: "cabinet_60k"
