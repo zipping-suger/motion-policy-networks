@@ -15,9 +15,9 @@ logfile="slurm-${timestamp}.out"
 cat <<EOT > job.sh
 #!/bin/bash
 #SBATCH -n 1
-#SBATCH --cpus-per-task=48
-#SBATCH --gpus=rtx_3090:3
-#SBATCH --time=23:00:00
+#SBATCH --cpus-per-task=96
+#SBATCH --gpus=rtx_3090:8
+#SBATCH --time=119:00:00
 #SBATCH --mem-per-cpu=4048
 #SBATCH --output=$logfile
 #SBATCH --mail-type=END
