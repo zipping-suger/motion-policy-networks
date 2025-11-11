@@ -29,7 +29,7 @@ except ImportError:
     rospy.logwarn("Ruckig not available. Install with: pip install ruckig")
     RUCKIG_AVAILABLE = False
 
-RUCKIG_AVAILABLE = False
+RUCKIG_AVAILABLE = False # Does not work well currently
 NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
@@ -846,8 +846,8 @@ class ReactiveControllerNode:
             
             # Scale duration based on the maximum change
             # Base duration + scaled component
-            base_duration = 0.04  # Minimum duration for very small movements
-            max_allowed_duration = 0.4  # Maximum duration for safety
+            base_duration = 0.02  # Minimum duration for very small movements
+            max_allowed_duration = 0.2  # Maximum duration for safety
             scaling_factor = 10.0  # Adjust this to control sensitivity
             
             # Calculate adaptive duration

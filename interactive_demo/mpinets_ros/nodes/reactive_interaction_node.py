@@ -93,7 +93,7 @@ class ReactiveInterface:
         self.server.applyChanges()
 
         time.sleep(1)
-        self.reset_franka()
+        # self.reset_franka()
 
     def reset_franka(self):
         """
@@ -369,7 +369,7 @@ class ReactiveInterface:
         """
         if feedback.event_type == InteractiveMarkerFeedback.BUTTON_CLICK:
             rospy.loginfo("Resetting system")
-            self.reset_franka()
+            # self.reset_franka()
 
         self.server.applyChanges()
 
