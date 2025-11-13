@@ -2,10 +2,10 @@ train_mode: "finetune"
 
 training_model_parameters:
     goal_loss_weight: 1
-    collision_loss_weight: 5
+    collision_loss_weight: 10
 
 data_module_parameters:
-  data_dir: /data/mpinets_hybrid_training_data
+  data_dir: /data/cubby_1k
   trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
@@ -14,12 +14,12 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: /workspace/pretrain_mpinets_hybrid_training_data/m67zonxm/last.ckpt
+model_path: /workspace/mpinets_finetune_mpinets_hybrid_training_data_small_hybrid_finetuned_on_small/sp2hrle1/epoch=14-step=17040.ckpt
 checkpoint_interval: 10
 validation_interval: 10
-gpus: 8 # If > 1, will use DDP for training.
+gpus: 1 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/full_mpinet_data_fixed_pc_encoder_smooth
+save_checkpoint_dir: /workspace/finetune_cubby_1k
 max_epochs: 50
-experiment_name: full_mpinet_data_fixed_pc_encoder_smooth
-description: "Finetuning MPINets on full MPINets dataset with fixed point cloud encoder and smooth loss"
+experiment_name: finetune_cubby_1k
+description: "cuubby 1k"
