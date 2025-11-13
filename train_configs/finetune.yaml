@@ -5,7 +5,7 @@ training_model_parameters:
     collision_loss_weight: 10
 
 data_module_parameters:
-  data_dir: /data/cubby_1k
+  data_dir: /data/cubby_2k
   trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
@@ -19,7 +19,7 @@ checkpoint_interval: 10
 validation_interval: 10
 gpus: 1 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/finetune_cubby_1k
+save_checkpoint_dir: /workspace/finetune_cubby_2k
 max_epochs: 50
-experiment_name: finetune_cubby_1k
-description: "cuubby 1k"
+experiment_name: finetune_cubby_2k
+description: "cubby 2k"
