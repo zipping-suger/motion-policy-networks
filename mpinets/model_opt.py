@@ -104,8 +104,8 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         self_collision_loss_weight: float = 2.0,
         use_self_collision: bool = False,
         smoothness_weight: float = 0.1, 
-        use_smoothness_loss: bool = False,
-        fix_point_cloud_encoder: bool = True,
+        use_smoothness_loss: bool = True,
+        fix_point_cloud_encoder: bool = False,
     ):
         super().__init__()
         self.num_robot_points = num_robot_points

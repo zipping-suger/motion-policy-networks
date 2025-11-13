@@ -14,12 +14,12 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: /workspace/mpinets_finetune_mpinets_hybrid_training_data_small_hybrid_finetuned_on_small/sp2hrle1/epoch=14-step=17040.ckpt
+model_path: /workspace/pretrain_mpinets_hybrid_training_data/m67zonxm/last.ckpt
 checkpoint_interval: 10
 validation_interval: 10
 gpus: 1 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/finetune_cubby_2k
+save_checkpoint_dir: /workspace/finetune_cubby_2k_with_pre_mpinet
 max_epochs: 50
-experiment_name: finetune_cubby_2k
+experiment_name: finetune_cubby_2k_with_pre_mpinet
 description: "cubby 2k"
