@@ -81,78 +81,84 @@ def get_tool_parameters(problem, device="cuda:0"):
 
 def sample_robot_points(gpu_fk_sampler, config, tool_params, num_points):
     """Sample robot points with appropriate method based on tool type"""
+    # Convert to tensors
+    device = config.device
+    dtype = config.dtype
+
+    # For both composite and single primitive, we use sample_composite
+    # For single primitive, wrap parameters in lists
     if tool_params["is_composite"] and tool_params["tool_num_primitives"] > 0:
-        # Convert to tensors
-        device = config.device
-        dtype = config.dtype
-
-        tool_dims_tensor = torch.tensor(
-            tool_params["tool_dims"], dtype=dtype, device=device
-        )
-        tool_offsets_tensor = torch.tensor(
-            tool_params["tool_offsets"], dtype=dtype, device=device
-        )
-        tool_quats_tensor = torch.tensor(
-            tool_params["tool_quats"], dtype=dtype, device=device
-        )
-        tool_num_primitives_tensor = torch.tensor(
-            tool_params["tool_num_primitives"], dtype=torch.long, device=device
-        )
-
-        return gpu_fk_sampler.sample_composite(
-            config,
-            tool_dims_tensor,
-            tool_offsets_tensor,
-            tool_quats_tensor,
-            tool_num_primitives_tensor,
-            num_points,
-        )
+        tool_dims = tool_params["tool_dims"]
+        tool_offsets = tool_params["tool_offsets"]
+        tool_quats = tool_params["tool_quats"]
     else:
-        return gpu_fk_sampler.sample(
-            config,
-            tool_params["tool_dims"],
-            tool_params["tool_offsets"],
-            tool_params["tool_quats"],
-            num_points,
-        )
+        # Single primitive - wrap in lists
+        if tool_params["tool_num_primitives"] > 0:
+            tool_dims = [tool_params["tool_dims"]]
+            tool_offsets = [tool_params["tool_offsets"]]
+            tool_quats = [tool_params["tool_quats"]]
+        else:
+            # No tool
+            tool_dims = []
+            tool_offsets = []
+            tool_quats = []
+
+    tool_dims_tensor = torch.tensor(tool_dims, dtype=dtype, device=device)
+    tool_offsets_tensor = torch.tensor(tool_offsets, dtype=dtype, device=device)
+    tool_quats_tensor = torch.tensor(tool_quats, dtype=dtype, device=device)
+    tool_num_primitives_tensor = torch.tensor(
+        len(tool_dims), dtype=torch.long, device=device
+    )
+
+    return gpu_fk_sampler.sample_composite(
+        config,
+        tool_dims_tensor,
+        tool_offsets_tensor,
+        tool_quats_tensor,
+        tool_num_primitives_tensor,
+        num_points,
+    )
 
 
 def sample_target_points(gpu_fk_sampler, pose, tool_params, num_points):
     """Sample target points with appropriate method based on tool type"""
+    # Convert to tensors
+    device = pose.device
+    dtype = pose.dtype
+
+    # For both composite and single primitive, we use sample_composite_end_effector
+    # For single primitive, wrap parameters in lists
     if tool_params["is_composite"] and tool_params["tool_num_primitives"] > 0:
-        # Convert to tensors
-        device = pose.device
-        dtype = pose.dtype
-
-        tool_dims_tensor = torch.tensor(
-            tool_params["tool_dims"], dtype=dtype, device=device
-        )
-        tool_offsets_tensor = torch.tensor(
-            tool_params["tool_offsets"], dtype=dtype, device=device
-        )
-        tool_quats_tensor = torch.tensor(
-            tool_params["tool_quats"], dtype=dtype, device=device
-        )
-        tool_num_primitives_tensor = torch.tensor(
-            tool_params["tool_num_primitives"], dtype=torch.long, device=device
-        )
-
-        return gpu_fk_sampler.sample_composite_end_effector(
-            pose,
-            tool_dims_tensor,
-            tool_offsets_tensor,
-            tool_quats_tensor,
-            tool_num_primitives_tensor,
-            num_points,
-        )
+        tool_dims = tool_params["tool_dims"]
+        tool_offsets = tool_params["tool_offsets"]
+        tool_quats = tool_params["tool_quats"]
     else:
-        return gpu_fk_sampler.sample_end_effector(
-            pose,
-            tool_params["tool_dims"],
-            tool_params["tool_offsets"],
-            tool_params["tool_quats"],
-            num_points,
-        )
+        # Single primitive - wrap in lists
+        if tool_params["tool_num_primitives"] > 0:
+            tool_dims = [tool_params["tool_dims"]]
+            tool_offsets = [tool_params["tool_offsets"]]
+            tool_quats = [tool_params["tool_quats"]]
+        else:
+            # No tool
+            tool_dims = []
+            tool_offsets = []
+            tool_quats = []
+
+    tool_dims_tensor = torch.tensor(tool_dims, dtype=dtype, device=device)
+    tool_offsets_tensor = torch.tensor(tool_offsets, dtype=dtype, device=device)
+    tool_quats_tensor = torch.tensor(tool_quats, dtype=dtype, device=device)
+    tool_num_primitives_tensor = torch.tensor(
+        len(tool_dims), dtype=torch.long, device=device
+    )
+
+    return gpu_fk_sampler.sample_composite_end_effector(
+        pose,
+        tool_dims_tensor,
+        tool_offsets_tensor,
+        tool_quats_tensor,
+        tool_num_primitives_tensor,
+        num_points,
+    )
 
 
 def make_point_cloud_from_problem(
@@ -402,13 +408,13 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
             for problem in tqdm(problem_set, leave=False):
                 tool_params = get_tool_parameters(problem)
 
-                if tool_params["tool_num_primitives"] > 0:
-                    if tool_params["is_composite"]:
-                        print(
-                            f"Using composite tool with {tool_params['tool_num_primitives']} primitives"
-                        )
-                    else:
-                        print(f"Using single primitive tool")
+                # if tool_params["tool_num_primitives"] > 0:
+                #     if tool_params["is_composite"]:
+                #         print(
+                #             f"Using composite tool with {tool_params['tool_num_primitives']} primitives"
+                #         )
+                #     else:
+                #         print(f"Using single primitive tool")
 
                 if problem.obstacle_point_cloud is None:
                     point_cloud = make_point_cloud_from_primitives(
@@ -444,6 +450,7 @@ def calculate_metrics(mdl_path: str, problems: List[PlanningProblem]):
                     problem.target_volume,
                     problem.target_negative_volumes,
                     time.time() - start_time,
+                    tool_params=tool_params  # Add this line
                 )
             print(f"Metrics for {scene_type}, {problem_type}")
             eval.print_group_metrics()
@@ -488,13 +495,13 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
             for problem in tqdm(problem_set, leave=False):
                 tool_params = get_tool_parameters(problem)
 
-                if tool_params["tool_num_primitives"] > 0:
-                    if tool_params["is_composite"]:
-                        print(
-                            f"Using composite tool with {tool_params['tool_num_primitives']} primitives"
-                        )
-                    else:
-                        print(f"Using single primitive tool")
+                # if tool_params["tool_num_primitives"] > 0:
+                #     if tool_params["is_composite"]:
+                #         print(
+                #             f"Using composite tool with {tool_params['tool_num_primitives']} primitives"
+                #         )
+                #     else:
+                #         print(f"Using single primitive tool")
 
                 eval.create_new_group(f"{scene_type}, {problem_type}")
                 if problem.obstacle_point_cloud is None:
@@ -531,6 +538,7 @@ def visualize_results(mdl_path: str, problems: ProblemSet):
                         problem.target_volume,
                         problem.target_negative_volumes,
                         time.time() - start_time,
+                        tool_params=tool_params  # Add this line
                     )
                 point_cloud_colors = np.zeros(
                     (3, NUM_OBSTACLE_POINTS + NUM_TARGET_POINTS)

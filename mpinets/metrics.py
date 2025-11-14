@@ -156,6 +156,97 @@ class Evaluator:
         self.current_group_key = key
         self.current_group = self.groups[key]
 
+    def _check_tool_collision(
+        self,
+        trajectory: Trajectory,
+        obstacles: Obstacles,
+        tool_params: Optional[Dict] = None,
+    ) -> bool:
+        """
+        Checks whether the tool attached to the end effector is in collision with obstacles
+
+        :param trajectory Trajectory: The trajectory
+        :param obstacles Obstacles: Obstacles to check
+        :param tool_params Optional[Dict]: Tool parameters from get_tool_parameters
+        :rtype bool: Whether there is a tool collision
+        """
+        if tool_params is None or tool_params.get("tool_num_primitives", 0) == 0:
+            return False
+
+        # Check each configuration in the trajectory
+        for q in trajectory:
+            # Get end effector pose
+            ee_pose = FrankaRobot.fk(q, eff_frame="right_gripper")
+
+            # Check each tool primitive for collision
+            if tool_params["is_composite"]:
+                # Composite tool with multiple primitives
+                for i in range(tool_params["tool_num_primitives"]):
+                    tool_dims = tool_params["tool_dims"][i]
+                    tool_offset = tool_params["tool_offsets"][i]
+                    tool_quat = tool_params["tool_quats"][i]
+
+                    # Calculate tool primitive pose - use @ operator for SE3 composition
+                    tool_relative_pose = SE3(xyz=tool_offset, quaternion=tool_quat)
+                    tool_pose = ee_pose @ tool_relative_pose
+
+                    # Create tool primitive geometry
+                    tool_primitive = Cuboid(
+                        center=tool_pose.xyz,
+                        dims=tool_dims,
+                        quaternion=tool_pose.so3.wxyz,
+                    )
+
+                    # Check collision with obstacles
+                    for obstacle in obstacles:
+                        if self._primitives_collide(tool_primitive, obstacle):
+                            return True
+            else:
+                # Single primitive tool
+                tool_dims = tool_params["tool_dims"]
+                tool_offset = tool_params["tool_offsets"]
+                tool_quat = tool_params["tool_quats"]
+
+                # Calculate tool primitive pose - use @ operator for SE3 composition
+                tool_relative_pose = SE3(xyz=tool_offset, quaternion=tool_quat)
+                tool_pose = ee_pose @ tool_relative_pose
+
+                # Create tool primitive geometry
+                tool_primitive = Cuboid(
+                    center=tool_pose.xyz, dims=tool_dims, quaternion=tool_pose.so3.wxyz
+                )
+
+                # Check collision with obstacles
+                for obstacle in obstacles:
+                    if self._primitives_collide(tool_primitive, obstacle):
+                        return True
+
+        return False
+
+    def _primitives_collide(self, prim1, prim2) -> bool:
+        """
+        Check if two primitives collide using SDF (Signed Distance Function)
+
+        :param prim1: First primitive (Cuboid, Cylinder, or Sphere)
+        :param prim2: Second primitive (Cuboid, Cylinder, or Sphere)
+        :rtype bool: Whether the primitives collide
+        """
+        # For simplicity, we'll use a conservative approach:
+        # Check if any corner of prim1 is inside prim2 or vice versa
+        if hasattr(prim1, "corners"):
+            for corner in prim1.corners:
+                if prim2.sdf(corner) <= 0:
+                    return True
+
+        if hasattr(prim2, "corners"):
+            for corner in prim2.corners:
+                if prim1.sdf(corner) <= 0:
+                    return True
+
+        # Additional check: sample points on surfaces
+        # This is a simplified collision check - you might want to use a more robust method
+        return False
+
     if USE_LULA:
 
         def _get_fabric(self, obstacles: Obstacles) -> lula.Fabric:
@@ -211,15 +302,23 @@ class Evaluator:
             fabric = lula.create_fabric(fabric_config)
             return fabric
 
-        def in_collision(self, trajectory: Trajectory, obstacles: Obstacles) -> bool:
+        def in_collision(
+            self,
+            trajectory: Trajectory,
+            obstacles: Obstacles,
+            tool_params: Optional[Dict] = None,
+        ) -> bool:
             """
             Checks whether the trajectory is in collision according to all including
             collision checkers (using AND between different methods)
 
             :param trajectory Trajectory: The trajectory
             :param obstacles Obstacles: Obstacles to check
+            :param tool_params Optional[Dict]: Tool parameters from get_tool_parameters
             :rtype bool: Whether there is a collision
             """
+            # Check robot collision (existing logic)
+            robot_collision = False
             fabric = self._get_fabric(obstacles)
             for i, q in enumerate(trajectory):
                 self.hd_sim_robot.marionette(q)
@@ -229,28 +328,50 @@ class Evaluator:
                     and self.sim.in_collision(self.hd_sim_robot, check_self=True)
                     and fabric.in_collision_with_obstacle(q.astype(np.double))
                 ):
-                    return True
-            return False
+                    robot_collision = True
+                    break
+
+            # Check tool collision (new)
+            tool_collision = self._check_tool_collision(
+                trajectory, obstacles, tool_params
+            )
+
+            return robot_collision or tool_collision
 
     else:
 
-        def in_collision(self, trajectory: Trajectory, obstacles: Obstacles) -> bool:
+        def in_collision(
+            self,
+            trajectory: Trajectory,
+            obstacles: Obstacles,
+            tool_params: Optional[Dict] = None,
+        ) -> bool:
             """
             Checks whether the trajectory is in collision according to all including
             collision checkers (using AND between different methods)
 
             :param trajectory Trajectory: The trajectory
             :param obstacles Obstacles: Obstacles to check
+            :param tool_params Optional[Dict]: Tool parameters from get_tool_parameters
             :rtype bool: Whether there is a collision
             """
+            # Check robot collision (existing logic)
+            robot_collision = False
             for i, q in enumerate(trajectory):
                 self.hd_sim_robot.marionette(q)
                 self.ld_sim_robot.marionette(q)
                 if self.sim.in_collision(
                     self.ld_sim_robot, check_self=True
                 ) and self.sim.in_collision(self.hd_sim_robot, check_self=True):
-                    return True
-            return False
+                    robot_collision = True
+                    break
+
+            # Check tool collision (new)
+            tool_collision = self._check_tool_collision(
+                trajectory, obstacles, tool_params
+            )
+
+            return robot_collision or tool_collision
 
     def has_self_collision(self, trajectory: Trajectory) -> bool:
         """
@@ -267,28 +388,15 @@ class Evaluator:
                 return True
         return False
 
-    def in_collision(self, trajectory: Trajectory, obstacles: Obstacles) -> bool:
+    def in_collision_legacy(self, trajectory: Trajectory, obstacles: Obstacles) -> bool:
         """
-        Checks whether the trajectory is in collision according to all including
-        collision checkers (using AND between different methods)
+        Legacy method for backward compatibility - checks collision without tool parameters
 
         :param trajectory Trajectory: The trajectory
         :param obstacles Obstacles: Obstacles to check
         :rtype bool: Whether there is a collision
         """
-        if USE_LULA:
-            fabric = self._get_fabric(obstacles)
-        for i, q in enumerate(trajectory):
-            self.hd_sim_robot.marionette(q)
-            self.ld_sim_robot.marionette(q)
-            if self.sim.in_collision(
-                self.ld_sim_robot, check_self=True
-            ) and self.sim.in_collision(self.hd_sim_robot, check_self=True):
-                if not USE_LULA:
-                    return True
-                if fabric.in_collision_with_obstacle(q.astype(np.double)):
-                    return True
-        return False
+        return self.in_collision(trajectory, obstacles, None)
 
     def get_collision_depths(
         self, trajectory: Trajectory, obstacles: Obstacles
@@ -322,17 +430,21 @@ class Evaluator:
         return False
 
     def has_physical_violation(
-        self, trajectory: Trajectory, obstacles: Obstacles
+        self,
+        trajectory: Trajectory,
+        obstacles: Obstacles,
+        tool_params: Optional[Dict] = None,
     ) -> bool:
         """
-        Checks whether there is any physical violation (collision, self collision, joint limit violation)
+        Checks whether there is any physical violation (collision, self collision, joint limit violation, tool collision)
 
         :param trajectory Trajectory: The trajectory
         :param obstacles Obstacles: The obstacles in the scene
+        :param tool_params Optional[Dict]: Tool parameters from get_tool_parameters
         :rtype bool: Whether there is at least one physical violation
         """
         return (
-            self.in_collision(trajectory, obstacles)
+            self.in_collision(trajectory, obstacles, tool_params)
             or self.violates_joint_limits(trajectory)
             or self.has_self_collision(trajectory)
         )
@@ -443,6 +555,7 @@ class Evaluator:
         target_negative_volumes: Obstacles,
         time: float,
         skip_metrics: bool = False,
+        tool_params: Optional[Dict] = None,
     ):
         """
         Evaluates a single trajectory and stores the metrics in the current group.
@@ -456,6 +569,7 @@ class Evaluator:
         :param target_negative_volumes Obstacles: Volumes that the target should definitely be outside
         :param time float: The time taken to calculate the trajectory
         :param skip_metrics bool: Whether to skip the path metrics (for example if it's a feasibility planner that failed)
+        :param tool_params Optional[Dict]: Tool parameters from get_tool_parameters
         """
 
         def add_metric(key, value):
@@ -469,7 +583,7 @@ class Evaluator:
         self.sim.clear_all_obstacles()
         self.sim.load_primitives(obstacles)
 
-        in_collision = self.in_collision(trajectory, obstacles)
+        in_collision = self.in_collision(trajectory, obstacles, tool_params)
         if in_collision:
             collision_depths = (
                 self.get_collision_depths(trajectory, obstacles) if in_collision else []
@@ -481,7 +595,9 @@ class Evaluator:
         add_metric("joint_limit_violation", self.violates_joint_limits(trajectory))
         add_metric("self_collision", self.has_self_collision(trajectory))
 
-        physical_violation = self.has_physical_violation(trajectory, obstacles)
+        physical_violation = self.has_physical_violation(
+            trajectory, obstacles, tool_params
+        )
         add_metric("physical_violations", physical_violation)
 
         final_pose = FrankaRobot.fk(trajectory[-1], eff_frame="right_gripper")
@@ -511,11 +627,16 @@ class Evaluator:
             final_pose, target_volume, corrected_negative_volumes
         )
 
+        # Add tool collision as a separate metric
+        tool_collision = self._check_tool_collision(trajectory, obstacles, tool_params)
+        add_metric("tool_collision", tool_collision)
+
         success = (
             position_error < 1
             and correct_final_region
             and orientation_error < 15
             and not physical_violation
+            and not tool_collision  # Add tool collision to success criteria
         )
 
         add_metric("success", success)
@@ -536,10 +657,11 @@ class Evaluator:
             print(
                 "Collisions:",
                 msg(
-                    self.in_collision(trajectory, obstacles),
-                    self.in_collision(trajectory, obstacles),
+                    self.in_collision(trajectory, obstacles, tool_params),
+                    self.in_collision(trajectory, obstacles, tool_params),
                 ),
             )
+            print("Tool Collision:", msg(tool_collision, tool_collision))
             if len(collision_depths) > 0:
                 print(f"Mean Collision Depths: {100 * np.max(collision_depths)}")
                 print(f"Median Collision Depths: {100 * np.median(collision_depths)}")
@@ -634,6 +756,9 @@ class Evaluator:
         collision = percent_true(group["collision"])
         joint_limit = percent_true(group["joint_limit_violation"])
         self_collision = percent_true(group["self_collision"])
+        tool_collision = percent_true(
+            group.get("tool_collision", [False] * len(group["success"]))
+        )
         depths = np.array(
             list(itertools.chain.from_iterable(group["collision_depths"]))
         )
@@ -651,6 +776,7 @@ class Evaluator:
             "step time": step_time,
             "env collision": collision,
             "self collision": self_collision,
+            "tool collision": tool_collision,
             "joint violation": joint_limit,
             "physical violations": physical,
             "average collision depth": 100 * np.mean(depths),
@@ -685,19 +811,21 @@ class Evaluator:
         print(f"% Within 0.5cm: {metrics['0.5 cm']:4.2f}")
         print(f"% Within 1cm: {metrics['1 cm']:4.2f}")
         print(f"% Within 5cm: {metrics['5 cm']:4.2f}")
-        print(f"% Within 5deg: {metrics['5 deg']:4.2f}")  
+        print(f"% Within 5deg: {metrics['5 deg']:4.2f}")
         print(f"% Within 15deg: {metrics['15 deg']:4.2f}")
         print(f"% Within 30deg: {metrics['30 deg']:4.2f}")
         print(f"% Within 15deg of 180: {metrics['165 deg']:4.2f}")
         print(f"Average Position Error (cm): {metrics['average position error']:4.2f}")
-        print(f"Average Orientation Error (deg): {metrics['average orientation error']:4.2f}")
+        print(
+            f"Average Orientation Error (deg): {metrics['average orientation error']:4.2f}"
+        )
         print(f"% With Environment Collision: {metrics['env collision']:4.2f}")
         print(f"% With Self Collision: {metrics['self collision']:4.2f}")
+        print(f"% With Tool Collision: {metrics['tool collision']:4.2f}")
         print(f"% With Joint Limit Violations: {metrics['joint violation']:4.2f}")
-        print(f"% With Self Collision: {metrics['self collision']:4.2f}")
+        print(f"% With Physical Violations: {metrics['physical violations']:4.2f}")
         print(f"Average Collision Depth (cm): {metrics['average collision depth']}")
         print(f"Median Collision Depth (cm): {metrics['median collision depth']}")
-        print(f"% With Physical Violations: {metrics['physical violations']:4.2f}")
         print(f"Average Config SPARC: {metrics['average config sparc']:4.2f}")
         print(f"Average End Eff SPARC: {metrics['average eff sparc']:4.2f}")
         print(f"% Smooth: {metrics['is smooth']:4.2f}")
