@@ -5,7 +5,7 @@ training_model_parameters:
     collision_loss_weight: 5
 
 data_module_parameters:
-  data_dir: /data/bin_test
+  data_dir: /data/bin_60k
   trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
@@ -17,9 +17,9 @@ shared_parameters:
 model_path: /workspace/finetune_small_mpinets_hybrid_training_data_smoothness_v2/2nu2d49z/epoch=0-step=11355.ckpt
 checkpoint_interval: 10
 validation_interval: 50
-gpus: 1 # If > 1, will use DDP for training.
+gpus: 2 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/finetune_bin
+save_checkpoint_dir: /workspace/finetune_best_bin_60k
 max_epochs: 50
-experiment_name: finetune_bin
-description: "finetune on bin dataset"
+experiment_name: finetune_best_bin_60k
+description: "finetune best model so far on bin dataset"
