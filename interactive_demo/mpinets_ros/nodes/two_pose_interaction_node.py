@@ -31,8 +31,12 @@ NEUTRAL_CONFIG = np.array([
 ])
 
 # A neutral starting target (matches the end effector of the neutral start)
-NEUTRAL_TARGET_XYZ = [0.30649957127333377, 0.007287351995245575, 0.4866376674460814]
+NEUTRAL_TARGET_XYZ = [0.40649957127333377, -0.4007287351995245575, 0.1066376674460814]
 NEUTRAL_TARGET_XYZW = [-0.99965734, -0.01424194, -0.02026548, -0.00846602]
+
+# Second target position (slightly offset from neutral)
+SECOND_TARGET_XYZ = [0.40649957127333377, 0.407287351995245575, 0.1066376674460814]
+SECOND_TARGET_XYZW = [-0.99965734, -0.01424194, -0.02026548, -0.00846602]
 
 # The joint names
 JOINT_NAMES = [
@@ -57,15 +61,24 @@ class ReactiveInterface:
         self.server = InteractiveMarkerServer("mpinets_controls", "")
         self.br = tf2_ros.TransformBroadcaster()
 
-        # UI elements - REMOVED RESET BUTTON
+        # UI elements
         self.make_start_button_marker([0.7, -1.0, 0.1], 0.2)
         self.make_stop_button_marker([1.0, -1.0, 0.1], 0.2)
 
         # State variables
-        self.target_xyz = NEUTRAL_TARGET_XYZ
-        self.target_xyzw = NEUTRAL_TARGET_XYZW
+        self.target_a_xyz = NEUTRAL_TARGET_XYZ
+        self.target_a_xyzw = NEUTRAL_TARGET_XYZW
+        self.target_b_xyz = SECOND_TARGET_XYZ
+        self.target_b_xyzw = SECOND_TARGET_XYZW
+        self.current_target = 'A'  # Current target in sequence
         self.current_joint_state = NEUTRAL_CONFIG.tolist()
         self.is_controlling = False
+        self.sequence_mode = False  # Whether we're running a sequence
+        
+        # NEW: Cycle control variables
+        self.num_cycles = 3  # Number of back-and-forth cycles
+        self.current_cycle = 0
+        self.moving_forward = True  # True: A->B, False: B->A
 
         # Publishers
         self.planning_problem_publisher = rospy.Publisher(
@@ -86,16 +99,78 @@ class ReactiveInterface:
         self.control_status_subscriber = rospy.Subscriber(
             "/mpinets/control_status", Bool, self.control_status_callback, queue_size=1
         )
+        
+        # NEW: Get number of cycles from parameter server
+        self.num_cycles = rospy.get_param("~num_cycles", 3)
+        # rospy.loginfo(f"Configured for {self.num_cycles} back-and-forth cycles")
 
-        # Create target marker
-        self.make_target_marker(self.target_xyz, self.target_xyzw)
+        # Create target markers
+        self.make_target_marker(self.target_a_xyz, self.target_a_xyzw, "target_a", "Target A", [0.0, 1.0, 0.0, 1.0])  # Green
+        self.make_target_marker(self.target_b_xyz, self.target_b_xyzw, "target_b", "Target B", [1.0, 0.0, 0.0, 1.0])  # Red
+        
         self.server.applyChanges()
 
     def control_status_callback(self, msg):
         """
-        Update control status
+        Update control status and handle sequence transitions
         """
+        was_controlling = self.is_controlling
         self.is_controlling = msg.data
+        
+        # If we were controlling but now we're not, and we're in sequence mode, move to next target
+        if was_controlling and not self.is_controlling and self.sequence_mode:
+            # rospy.loginfo("Control completed for target {}".format(self.current_target))
+            
+            # NEW: Handle back-and-forth cycling logic
+            if self.moving_forward:
+                # We just completed A->B
+                if self.current_target == 'A':
+                    # Move to target B
+                    self.current_target = 'B'
+                    # rospy.loginfo(f"Cycle {self.current_cycle + 1}/{self.num_cycles}: Moving to target B")
+                    time.sleep(0.5)  # Brief pause between targets
+                    self.send_planning_problem(self.target_b_xyz, self.target_b_xyzw)
+                elif self.current_target == 'B':
+                    # Completed A->B, check if we need to go back
+                    if self.current_cycle < self.num_cycles - 1:
+                        # More cycles to go, reverse direction
+                        self.moving_forward = False
+                        self.current_target = 'A'
+                        # rospy.loginfo(f"Cycle {self.current_cycle + 1}/{self.num_cycles}: Moving back to target A")
+                        time.sleep(0.5)
+                        self.send_planning_problem(self.target_a_xyz, self.target_a_xyzw)
+                    else:
+                        # Final cycle completed
+                        # rospy.loginfo(f"Sequence complete: {self.num_cycles} back-and-forth cycles finished!")
+                        self.sequence_mode = False
+                        self.current_cycle = 0
+                        self.moving_forward = True
+                        self.current_target = 'A'
+            else:
+                # We just completed B->A
+                if self.current_target == 'B':
+                    # Move to target A
+                    self.current_target = 'A'
+                    # rospy.loginfo(f"Cycle {self.current_cycle + 1}/{self.num_cycles}: Moving to target A")
+                    time.sleep(0.5)
+                    self.send_planning_problem(self.target_a_xyz, self.target_a_xyzw)
+                elif self.current_target == 'A':
+                    # Completed B->A, increment cycle and reverse direction
+                    self.current_cycle += 1
+                    self.moving_forward = True
+                    if self.current_cycle < self.num_cycles:
+                        # Start next cycle: A->B
+                        self.current_target = 'B'
+                        # rospy.loginfo(f"Cycle {self.current_cycle + 1}/{self.num_cycles}: Starting next cycle to target B")
+                        time.sleep(0.5)
+                        self.send_planning_problem(self.target_b_xyz, self.target_b_xyzw)
+                    else:
+                        # All cycles completed
+                        # rospy.loginfo(f"Sequence complete: {self.num_cycles} back-and-forth cycles finished!")
+                        self.sequence_mode = False
+                        self.current_cycle = 0
+                        self.moving_forward = True
+                        self.current_target = 'A'
 
     def real_joint_state_callback(self, msg):
         """
@@ -143,7 +218,7 @@ class ReactiveInterface:
 
     def make_start_button_marker(self, xyz, side_length):
         """
-        Creates a green cube that starts reactive control
+        Creates a green cube that starts reactive control sequence (A -> B -> A -> B ... for n cycles)
         """
         int_marker = InteractiveMarker()
         int_marker.header.frame_id = "panda_link0"
@@ -155,7 +230,6 @@ class ReactiveInterface:
         int_marker.scale = 0.5
         int_marker.name = "start_button"
         int_marker.description = "Start Control"
-
         control = InteractiveMarkerControl()
         control.interaction_mode = InteractiveMarkerControl.BUTTON
         control.name = "start_button_control"
@@ -193,17 +267,20 @@ class ReactiveInterface:
         self.server.insert(int_marker)
         self.server.setCallback(int_marker.name, self.stop_button_callback)
 
-    def make_gripper_control(self, msg):
+    def make_gripper_control(self, msg, color=None):
         """
         Creates the gripper marker for the target
         """
         control = InteractiveMarkerControl()
         control.always_visible = True
-        control.markers.append(self.make_gripper(msg))
+        gripper_marker = self.make_gripper(msg)
+        if color:
+            gripper_marker.color.r, gripper_marker.color.g, gripper_marker.color.b, gripper_marker.color.a = color
+        control.markers.append(gripper_marker)
         msg.controls.append(control)
         return msg.controls[-1]
 
-    def make_target_marker(self, xyz, xyzw):
+    def make_target_marker(self, xyz, xyzw, name, description, color=None):
         """
         Create the target interactive marker
         """
@@ -221,10 +298,10 @@ class ReactiveInterface:
             int_marker.pose.orientation.w,
         ) = xyzw
         int_marker.scale = 0.4
-        int_marker.name = "target"
-        int_marker.description = "Target Pose"
+        int_marker.name = name
+        int_marker.description = description
 
-        self.make_gripper_control(int_marker)
+        self.make_gripper_control(int_marker, color)
         int_marker.controls[0].interaction_mode = InteractiveMarkerControl.NONE
 
         # Add 6DOF controls
@@ -275,35 +352,51 @@ class ReactiveInterface:
         int_marker.controls.append(deepcopy(control))
 
         self.server.insert(int_marker)
-        self.server.setCallback(int_marker.name, self.target_feedback)
+        
+        # Set callback based on target name
+        if name == "target_a":
+            self.server.setCallback(int_marker.name, self.target_a_feedback)
+        elif name == "target_b":
+            self.server.setCallback(int_marker.name, self.target_b_feedback)
+
+    def send_planning_problem(self, target_xyz, target_xyzw):
+        """
+        Helper method to send planning problem
+        """
+        msg = PlanningProblem()
+        msg.header.stamp = rospy.Time.now()
+        msg.joint_names = JOINT_NAMES[:7]
+        msg.target = TransformStamped()
+        msg.target.header.frame_id = "panda_link0"
+        msg.target.child_frame_id = "target_frame"
+        (
+            msg.target.transform.translation.x,
+            msg.target.transform.translation.y,
+            msg.target.transform.translation.z,
+        ) = target_xyz
+        (
+            msg.target.transform.rotation.x,
+            msg.target.transform.rotation.y,
+            msg.target.transform.rotation.z,
+            msg.target.transform.rotation.w,
+        ) = target_xyzw
+        msg.q0 = JointState(position=self.current_joint_state[:7])
+
+        self.planning_problem_publisher.publish(msg)
 
     def start_button_callback(self, feedback):
         """
-        Start reactive control
+        Start reactive control sequence (A -> B -> A -> B ... for n cycles)
         """
         if feedback.event_type == InteractiveMarkerFeedback.BUTTON_CLICK:
-            rospy.loginfo("Starting reactive control")
-
-            msg = PlanningProblem()
-            msg.header.stamp = rospy.Time.now()
-            msg.joint_names = JOINT_NAMES[:7]
-            msg.target = TransformStamped()
-            msg.target.header.frame_id = "panda_link0"
-            msg.target.child_frame_id = "target_frame"
-            (
-                msg.target.transform.translation.x,
-                msg.target.transform.translation.y,
-                msg.target.transform.translation.z,
-            ) = self.target_xyz
-            (
-                msg.target.transform.rotation.x,
-                msg.target.transform.rotation.y,
-                msg.target.transform.rotation.z,
-                msg.target.transform.rotation.w,
-            ) = self.target_xyzw
-            msg.q0 = JointState(position=self.current_joint_state[:7])
-
-            self.planning_problem_publisher.publish(msg)
+            # rospy.loginfo(f"Starting back-and-forth control: {self.num_cycles} cycles (A <-> B)")
+            self.sequence_mode = True
+            self.current_cycle = 0
+            self.moving_forward = True
+            self.current_target = 'A'
+            
+            # Start with target A
+            self.send_planning_problem(self.target_a_xyz, self.target_a_xyzw)
 
         self.server.applyChanges()
 
@@ -312,23 +405,44 @@ class ReactiveInterface:
         Stop reactive control - actually send a stop command now
         """
         if feedback.event_type == InteractiveMarkerFeedback.BUTTON_CLICK:
-            rospy.loginfo("Stopping reactive control")
+            # rospy.loginfo("Stopping reactive control and resetting sequence")
             # Publish stop command
             self.stop_control_publisher.publish(Bool(data=True))
+            self.sequence_mode = False
+            self.current_cycle = 0
+            self.moving_forward = True
+            self.current_target = 'A'  # Reset sequence to start
 
         self.server.applyChanges()
 
-    def target_feedback(self, feedback):
+    def target_a_feedback(self, feedback):
         """
-        Update target pose when user moves the marker
+        Update target A pose when user moves the marker
         """
         if feedback.event_type == InteractiveMarkerFeedback.POSE_UPDATE:
-            self.target_xyz = (
+            self.target_a_xyz = (
                 feedback.pose.position.x,
                 feedback.pose.position.y,
                 feedback.pose.position.z,
             )
-            self.target_xyzw = (
+            self.target_a_xyzw = (
+                feedback.pose.orientation.x,
+                feedback.pose.orientation.y,
+                feedback.pose.orientation.z,
+                feedback.pose.orientation.w,
+            )
+
+    def target_b_feedback(self, feedback):
+        """
+        Update target B pose when user moves the marker
+        """
+        if feedback.event_type == InteractiveMarkerFeedback.POSE_UPDATE:
+            self.target_b_xyz = (
+                feedback.pose.position.x,
+                feedback.pose.position.y,
+                feedback.pose.position.z,
+            )
+            self.target_b_xyzw = (
                 feedback.pose.orientation.x,
                 feedback.pose.orientation.y,
                 feedback.pose.orientation.z,

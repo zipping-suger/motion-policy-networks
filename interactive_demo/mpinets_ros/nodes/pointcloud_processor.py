@@ -12,6 +12,7 @@ class PointCloudProcessor:
         rospy.init_node("pointcloud_processor")
         
         self.num_points = 4096
+        self.publish_rate = rospy.get_param('~publish_rate', 10)  # Default to 10 Hz
         
         self.processed_pub = rospy.Publisher(
             "/mpinets/processed_pointcloud", PointCloud2, queue_size=1
@@ -23,8 +24,15 @@ class PointCloudProcessor:
             self.pointcloud_callback,
             queue_size=1,
         )
-
-        rospy.loginfo("PointCloudProcessor node ready")
+        
+        # Store the latest processed point cloud
+        self.latest_processed_points = None
+        self.rate = rospy.Rate(self.publish_rate)
+        
+        rospy.loginfo(f"PointCloudProcessor node ready, publishing at {self.publish_rate} Hz")
+        
+        # Start the publishing loop
+        self.publish_loop()
 
     def pointcloud_callback(self, msg):
         """Extract and randomly sample points from incoming point cloud"""
@@ -49,11 +57,18 @@ class PointCloudProcessor:
                 indices = np.random.choice(len(repeated_points), self.num_points, replace=False)
                 sampled_points = repeated_points[indices]
             
-            # Publish sampled point cloud
-            self.publish_pointcloud(sampled_points)
+            # Store for publishing in the main loop
+            self.latest_processed_points = sampled_points
             
         except Exception as e:
             rospy.logerr(f"Point cloud processing error: {e}")
+
+    def publish_loop(self):
+        """Main publishing loop that runs at fixed rate"""
+        while not rospy.is_shutdown():
+            if self.latest_processed_points is not None:
+                self.publish_pointcloud(self.latest_processed_points)
+            self.rate.sleep()
 
     def publish_pointcloud(self, points):
         """Publish the sampled point cloud"""
@@ -73,4 +88,3 @@ class PointCloudProcessor:
 
 if __name__ == "__main__":
     processor = PointCloudProcessor()
-    rospy.spin()

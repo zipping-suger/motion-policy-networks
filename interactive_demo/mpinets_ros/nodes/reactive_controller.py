@@ -188,7 +188,14 @@ class ReactiveControllerNode:
         self.base_frame = "panda_link0"
 
         # Control parameters
-        self.control_rate = rospy.get_param("~control_rate", 50.0)  # Hz
+        self.control_rate = rospy.get_param("~control_rate", 30.0)  # Hz
+
+        # OSCILLATION DETECTION PARAMETERS - NEW
+        self.use_oscillation_detection = rospy.get_param("~use_oscillation_detection", True)
+        self.oscillation_cmd_swing_threshold = rospy.get_param("~oscillation_cmd_swing_threshold", 0.05)
+        self.oscillation_movement_threshold = rospy.get_param("~oscillation_movement_threshold", 0.01)
+        
+        rospy.loginfo(f"Oscillation detection: {'ENABLED' if self.use_oscillation_detection else 'DISABLED'}")
 
         # Ruckig initialization
         self.ruckig_initialized = False
@@ -226,7 +233,7 @@ class ReactiveControllerNode:
         self.control_thread = None
         self.control_lock = threading.Lock()
         self.stop_requested = False
-        self.target_reached = False  # New flag to track if target has been reached
+        self.target_reached = False  # Flag to track if target has been reached
         self.maintenance_joint_state = None  # Joint state to maintain when target is reached
 
         # Waypoint buffer for Ruckig smoothing
@@ -250,7 +257,7 @@ class ReactiveControllerNode:
                 )
             rospy.loginfo("Using live pointcloud mode")
 
-        # Publishers and subscribers
+        # --- Publishers and subscribers ---
         self.joint_command_publisher = rospy.Publisher(
             "/position_joint_trajectory_controller/command",
             JointTrajectory,
@@ -260,6 +267,12 @@ class ReactiveControllerNode:
         self.status_publisher = rospy.Publisher(
             "/mpinets/control_status", Bool, queue_size=1
         )
+
+        # *** NEW PUBLISHER ***
+        self.target_reached_publisher = rospy.Publisher(
+            "/mpinets/target_reached", Bool, queue_size=1
+        )
+        # ***********************
 
         self.full_point_cloud_publisher = rospy.Publisher(
             "/mpinets/full_point_cloud", PointCloud2, queue_size=1
@@ -725,10 +738,14 @@ class ReactiveControllerNode:
 
     def control_loop(self):
         """
-        Main reactive control loop with Ruckig smoothing
-        Now continues running even after target is reached, but blocks neural network when target is reached
+        Main reactive control loop with proper sequence handling
         """
         rate = rospy.Rate(self.control_rate)
+
+        # Initialize oscillation detection variables
+        prev_cmd = None
+        oscillation_detected_count = 0
+        max_oscillation_count = 5
 
         while self.is_controlling and not rospy.is_shutdown():
             try:
@@ -749,71 +766,76 @@ class ReactiveControllerNode:
                         or self.target_pose is None
                         or self.latest_pointcloud is None
                     ):
-                        # Log waiting status based on mode
-                        if not USE_SELF_FEEDBACK and self.current_joint_state is None:
-                            rospy.logwarn_throttle(
-                                5, "Waiting for real joint states..."
-                            )
-                        elif self.target_pose is None:
-                            rospy.logwarn_throttle(5, "Waiting for target pose...")
-                        elif self.latest_pointcloud is None:
-                            rospy.logwarn_throttle(5, "Waiting for point cloud data...")
                         continue
 
-                    # Check if we've reached the target (but don't stop the loop)
+                    # Check if we've reached the target
                     target_reached_now = self.controller.check_success(
                         self.current_joint_state, self.target_pose
                     )
                     
-                    # Log when target is first reached and store maintenance joint state
+                    # Log when target is first reached
                     if target_reached_now and not self.target_reached:
-                        rospy.loginfo("Target reached! Switching to maintenance mode (neural network blocked).")
+                        rospy.loginfo("Target reached! Publishing 'done' message and stopping control.")
                         self.target_reached = True
-                        self.maintenance_joint_state = self.current_joint_state.copy()
-                        self.waypoint_buffer = []  # Clear waypoint buffer
-                    
-                    # Log periodically if we're maintaining position at target
-                    if self.target_reached:
-                        rospy.loginfo_throttle(10, "Maintaining position at target (neural network blocked)")
-
-                    # BLOCK NEURAL NETWORK WHEN TARGET IS REACHED
-                    if self.target_reached and self.maintenance_joint_state is not None:
-                        # Use the stored joint state for maintenance (no neural network)
-                        raw_q_next = self.maintenance_joint_state.copy()
-                        rospy.loginfo_throttle(5, "Using maintenance joint state (neural network blocked)")
-                    else:
-                        # Get next action from neural network (only when not at target)
-                        raw_q_next = self.controller.get_next_action(
-                            self.current_joint_state,
-                            self.target_pose,
-                            self.latest_pointcloud,
-                        )
-
-                        # Add to waypoint buffer for smoothing
-                        self.waypoint_buffer.append(raw_q_next.copy())
                         
-                        # Keep buffer size manageable
-                        if len(self.waypoint_buffer) > self.max_waypoints:
-                            self.waypoint_buffer.pop(0)
+                        # Publish target reached message
+                        self.target_reached_publisher.publish(Bool(data=True))
+                        
+                        # Stop control to allow sequence to progress
+                        self.is_controlling = False
+                        self.status_publisher.publish(Bool(data=False))
+                        rospy.loginfo("Control stopped, waiting for next target in sequence")
+                        break
+
+                    # Get next action from neural network
+                    raw_q_next = self.controller.get_next_action(
+                        self.current_joint_state,
+                        self.target_pose,
+                        self.latest_pointcloud,
+                    )
+
+                    # Add to waypoint buffer for smoothing
+                    self.waypoint_buffer.append(raw_q_next.copy())
+                    
+                    # Keep buffer size manageable
+                    if len(self.waypoint_buffer) > self.max_waypoints:
+                        self.waypoint_buffer.pop(0)
 
                     # Apply Ruckig smoothing if available and we have waypoints
-                    if (self.ruckig_initialized and len(self.waypoint_buffer) >= 1 and 
-                        not self.target_reached):
+                    if (self.ruckig_initialized and len(self.waypoint_buffer) >= 1):
                         smoothed_q_next, smoothed_velocity, smoothed_acceleration = self.smooth_with_ruckig(
                             self.current_joint_state, self.waypoint_buffer
                         )
                     else:
-                        # When Ruckig is not available or target is reached, use current output with zero velocity/acceleration
                         smoothed_q_next = raw_q_next
                         smoothed_velocity = np.zeros(7)
                         smoothed_acceleration = np.zeros(7)
 
+                    # Oscillation detection
+                    if (self.use_oscillation_detection and 
+                        prev_cmd is not None and 
+                        self.current_joint_state is not None):
+                        
+                        cmd_swing = np.linalg.norm(smoothed_q_next - prev_cmd)
+                        actual_movement = np.linalg.norm(self.current_joint_state - prev_cmd)
+                        
+                        if (cmd_swing > self.oscillation_cmd_swing_threshold and 
+                            actual_movement < self.oscillation_movement_threshold):
+                            
+                            oscillation_detected_count += 1
+                            if oscillation_detected_count >= max_oscillation_count:
+                                rospy.logwarn("Command oscillation detected - holding current position")
+                                smoothed_q_next = self.current_joint_state.copy()
+                                oscillation_detected_count = 0
+                        else:
+                            oscillation_detected_count = 0
+                    
+                    prev_cmd = smoothed_q_next.copy()
+
                     # Update internal state based on feedback mode
                     if USE_SELF_FEEDBACK:
-                        # Self-feedback: use smoothed commanded positions as current state
                         self.current_joint_state = smoothed_q_next.copy()
                         self.full_joint_state[:7] = smoothed_q_next
-                        # Note: Joint states will be published by the timer
 
                 # Send smoothed joint command
                 self.send_joint_command(smoothed_q_next, smoothed_velocity, smoothed_acceleration)
@@ -823,14 +845,157 @@ class ReactiveControllerNode:
                 rospy.logerr(f"Error in control loop: {e}")
                 self.is_controlling = False
                 self.target_reached = False
-                self.maintenance_joint_state = None
                 self.status_publisher.publish(Bool(data=False))
-                self.waypoint_buffer = []
                 break
 
             rate.sleep()
 
         rospy.loginfo("Reactive control loop stopped")
+
+    # def control_loop(self):
+    #     """
+    #     Main reactive control loop with Ruckig smoothing
+    #     Now continues running even after target is reached, but blocks neural network when target is reached
+    #     """
+    #     rate = rospy.Rate(self.control_rate)
+
+    #     # Initialize oscillation detection variables
+    #     prev_cmd = None
+    #     oscillation_detected_count = 0
+    #     max_oscillation_count = 5  # Number of consecutive oscillations before taking action
+
+    #     while self.is_controlling and not rospy.is_shutdown():
+    #         try:
+    #             with self.control_lock:
+    #                 # Check if stop was requested
+    #                 if self.stop_requested:
+    #                     rospy.loginfo("Stop requested, exiting control loop")
+    #                     self.is_controlling = False
+    #                     self.target_reached = False
+    #                     self.maintenance_joint_state = None
+    #                     self.status_publisher.publish(Bool(data=False))
+    #                     self.waypoint_buffer = []
+    #                     break
+
+    #                 # Check if we have all necessary data
+    #                 if (
+    #                     self.current_joint_state is None
+    #                     or self.target_pose is None
+    #                     or self.latest_pointcloud is None
+    #                 ):
+    #                     # Log waiting status based on mode
+    #                     if not USE_SELF_FEEDBACK and self.current_joint_state is None:
+    #                         rospy.logwarn_throttle(
+    #                             5, "Waiting for real joint states..."
+    #                         )
+    #                     elif self.target_pose is None:
+    #                         rospy.logwarn_throttle(5, "Waiting for target pose...")
+    #                     elif self.latest_pointcloud is None:
+    #                         rospy.logwarn_throttle(5, "Waiting for point cloud data...")
+    #                     continue
+
+    #                 # Check if we've reached the target (but don't stop the loop)
+    #                 target_reached_now = self.controller.check_success(
+    #                     self.current_joint_state, self.target_pose
+    #                 )
+                    
+    #                 # Log when target is first reached and store maintenance joint state
+    #                 if target_reached_now and not self.target_reached:
+    #                     rospy.loginfo("Target reached! Publishing 'done' message and switching to maintenance mode.")
+    #                     self.target_reached = True
+    #                     self.maintenance_joint_state = self.current_joint_state.copy()
+    #                     self.waypoint_buffer = []  # Clear waypoint buffer
+                        
+    #                     # --- *** PUBLISH 'DONE' MESSAGE *** ---
+    #                     self.target_reached_publisher.publish(Bool(data=True))
+    #                     # ----------------------------------------
+                    
+    #                 # Log periodically if we're maintaining position at target
+    #                 if self.target_reached:
+    #                     rospy.loginfo_throttle(10, "Maintaining position at target (neural network blocked)")
+
+    #                 # BLOCK NEURAL NETWORK WHEN TARGET IS REACHED
+    #                 if self.target_reached and self.maintenance_joint_state is not None:
+    #                     # Use the stored joint state for maintenance (no neural network)
+    #                     raw_q_next = self.maintenance_joint_state.copy()
+    #                     rospy.loginfo_throttle(5, "Using maintenance joint state (neural network blocked)")
+    #                 else:
+    #                     # Get next action from neural network (only when not at target)
+    #                     raw_q_next = self.controller.get_next_action(
+    #                         self.current_joint_state,
+    #                         self.target_pose,
+    #                         self.latest_pointcloud,
+    #                     )
+
+    #                     # Add to waypoint buffer for smoothing
+    #                     self.waypoint_buffer.append(raw_q_next.copy())
+                        
+    #                     # Keep buffer size manageable
+    #                     if len(self.waypoint_buffer) > self.max_waypoints:
+    #                         self.waypoint_buffer.pop(0)
+
+    #                 # Apply Ruckig smoothing if available and we have waypoints
+    #                 if (self.ruckig_initialized and len(self.waypoint_buffer) >= 1 and 
+    #                     not self.target_reached):
+    #                     smoothed_q_next, smoothed_velocity, smoothed_acceleration = self.smooth_with_ruckig(
+    #                         self.current_joint_state, self.waypoint_buffer
+    #                     )
+    #                 else:
+    #                     # When Ruckig is not available or target is reached, use current output with zero velocity/acceleration
+    #                     smoothed_q_next = raw_q_next
+    #                     smoothed_velocity = np.zeros(7)
+    #                     smoothed_acceleration = np.zeros(7)
+
+    #                 # QUICK FIX OSCILLATION DETECTION - WITH DISABLE PARAMETER
+    #                 if (self.use_oscillation_detection and 
+    #                     prev_cmd is not None and 
+    #                     self.current_joint_state is not None and
+    #                     not self.target_reached):  # Don't apply during maintenance mode
+                        
+    #                     cmd_swing = np.linalg.norm(smoothed_q_next - prev_cmd)
+    #                     actual_movement = np.linalg.norm(self.current_joint_state - prev_cmd)
+                        
+    #                     # If commands are changing but robot isn't moving much, we're oscillating
+    #                     if (cmd_swing > self.oscillation_cmd_swing_threshold and 
+    #                         actual_movement < self.oscillation_movement_threshold):
+                            
+    #                         oscillation_detected_count += 1
+    #                         if oscillation_detected_count >= max_oscillation_count:
+    #                             rospy.logwarn_throttle(1, f"Command oscillation detected - holding current position (count: {oscillation_detected_count})")
+    #                             # Use current robot position instead of oscillating command
+    #                             smoothed_q_next = self.current_joint_state.copy()
+    #                             oscillation_detected_count = 0  # Reset counter
+    #                         else:
+    #                             rospy.loginfo_throttle(1, f"Oscillation suspected (count: {oscillation_detected_count}/{max_oscillation_count})")
+    #                     else:
+    #                         # Reset counter if no oscillation detected
+    #                         oscillation_detected_count = 0
+                    
+    #                 prev_cmd = smoothed_q_next.copy()
+
+    #                 # Update internal state based on feedback mode
+    #                 if USE_SELF_FEEDBACK:
+    #                     # Self-feedback: use smoothed commanded positions as current state
+    #                     self.current_joint_state = smoothed_q_next.copy()
+    #                     self.full_joint_state[:7] = smoothed_q_next
+    #                     # Note: Joint states will be published by the timer
+
+    #             # Send smoothed joint command
+    #             self.send_joint_command(smoothed_q_next, smoothed_velocity, smoothed_acceleration)
+    #             self.status_publisher.publish(Bool(data=True))
+
+    #         except Exception as e:
+    #             rospy.logerr(f"Error in control loop: {e}")
+    #             self.is_controlling = False
+    #             self.target_reached = False
+    #             self.maintenance_joint_state = None
+    #             self.status_publisher.publish(Bool(data=False))
+    #             self.waypoint_buffer = []
+    #             break
+
+    #         rate.sleep()
+
+    #     rospy.loginfo("Reactive control loop stopped")
 
     def send_joint_command(self, joint_positions: np.ndarray, joint_velocities: np.ndarray, joint_accelerations: np.ndarray):
         """
@@ -846,8 +1011,8 @@ class ReactiveControllerNode:
             
             # Scale duration based on the maximum change
             # Base duration + scaled component
-            base_duration = 0.02  # Minimum duration for very small movements
-            max_allowed_duration = 0.2  # Maximum duration for safety
+            base_duration = 0.03  # Minimum duration for very small movements
+            max_allowed_duration = 0.3  # Maximum duration for safety
             scaling_factor = 10.0  # Adjust this to control sensitivity
             
             # Calculate adaptive duration
@@ -856,7 +1021,7 @@ class ReactiveControllerNode:
             
             # If target is reached, use a fixed small duration for stability
             if self.target_reached:
-                duration = 0.1  # Fixed duration when maintaining position
+                duration = 0.3  # Fixed duration when maintaining position
                 
             rospy.loginfo_throttle(5, f"Max joint delta: {max_delta:.4f}, Command duration: {duration:.3f}s, Target reached: {self.target_reached}")
 
