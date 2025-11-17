@@ -2,10 +2,10 @@ train_mode: "finetune"
 
 training_model_parameters:
     goal_loss_weight: 1
-    collision_loss_weight: 10
+    collision_loss_weight: 5
 
 data_module_parameters:
-  data_dir: /data/tabletop_tools_complex_65k
+  data_dir: /data/bin_test
   trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
@@ -14,12 +14,12 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: /workspace/pretrain_tabletop_tools_complex_65k/q1dbvpgt/epoch-epoch=11-end.ckpt
+model_path: /workspace/finetune_small_mpinets_hybrid_training_data_smoothness_v2/2nu2d49z/epoch=0-step=11355.ckpt
 checkpoint_interval: 10
-validation_interval: 10
+validation_interval: 50
 gpus: 1 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/pretrain_finetune_with_tabletop_tools_complex_65k
+save_checkpoint_dir: /workspace/finetune_bin
 max_epochs: 50
-experiment_name: pretrain_finetune_with_tabletop_tools_complex_65k
-description: "Pretrain and finetune on tabletop_tools_complex_65k dataset with diverse tools"
+experiment_name: finetune_bin
+description: "finetune on bin dataset"

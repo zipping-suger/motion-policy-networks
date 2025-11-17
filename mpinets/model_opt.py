@@ -112,6 +112,8 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         collision_loss_weight: float,
         self_collision_loss_weight: float = 2.0,  # New weight for self-collision
         use_self_collision: bool = False,  # Flag to enable/disable self-collision loss
+        smoothness_weight: float = 0.1,  # New weight for smoothness loss
+        use_smoothness_loss: bool = True,  # Flag to enable/disable smoothness loss
     ):
         super().__init__()
         self.num_robot_points = num_robot_points
@@ -121,6 +123,8 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         self.collision_loss_weight = collision_loss_weight
         self.self_collision_loss_weight = self_collision_loss_weight
         self.use_self_collision = use_self_collision
+        self.smoothness_weight = smoothness_weight
+        self.use_smoothness_loss = use_smoothness_loss
         self.validation_step_outputs = []
 
         # Update the point cloud encoder or not
@@ -222,6 +226,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        torch.Tensor,  # Added smoothness_loss to return tuple
     ]:
         """
         Evaluates a rollout by computing the difference between the last configuration
@@ -358,17 +363,42 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
                         )
                         total_self_colli_loss += self_colli_loss
 
-        # Calculate total loss with optional self-collision component
+        # Smoothness loss - NEW ADDITION
+        smoothness_loss = 0.0
+        if self.use_smoothness_loss and len(rollout) > 1:
+            # Compute joint velocities between consecutive configurations
+            for i in range(len(rollout) - 1):
+                # Velocity: difference between consecutive configurations
+                velocity = rollout[i + 1] - rollout[i]
+
+                # L2 norm of velocity (encourages small, smooth changes)
+                velocity_penalty = torch.mean(torch.sum(velocity**2, dim=1))
+                smoothness_loss += velocity_penalty
+
+                # Optional: Add acceleration penalty for even smoother motions
+                if i < len(rollout) - 2:
+                    acceleration = rollout[i + 2] - 2 * rollout[i + 1] + rollout[i]
+                    acceleration_penalty = torch.mean(torch.sum(acceleration**2, dim=1))
+                    smoothness_loss += (
+                        0.3 * acceleration_penalty
+                    )  # Lower weight for acceleration
+
+            # Normalize by number of transitions
+            smoothness_loss = smoothness_loss / (len(rollout) - 1)
+
+        # Calculate total loss with optional self-collision and smoothness components
         if self.use_self_collision:
             train_loss = (
                 self.goal_loss_weight * goal_loss
                 + self.collision_loss_weight * total_colli_loss
                 + self.self_collision_loss_weight * total_self_colli_loss
+                + self.smoothness_weight * smoothness_loss
             )
         else:
             train_loss = (
                 self.goal_loss_weight * goal_loss
                 + self.collision_loss_weight * total_colli_loss
+                + self.smoothness_weight * smoothness_loss
             )
 
         return (
@@ -378,6 +408,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             total_self_colli_loss,
             torch.mean(position_loss),
             torch.mean(rotation_loss),
+            smoothness_loss,  # Return smoothness loss for logging
         )
 
     def training_step(  # type: ignore[override]
@@ -409,6 +440,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             self_colli_loss,
             position_loss,
             rotation_loss,
+            smoothness_loss,  # Unpack smoothness loss
         ) = self.eval_rollout(rollout, batch)
 
         self.log("train_loss", train_loss)
@@ -418,6 +450,8 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             self.log("self_colli_loss", self_colli_loss)
         self.log("position_loss", position_loss)
         self.log("rotation_loss", rotation_loss)
+        if self.use_smoothness_loss:
+            self.log("smoothness_loss", smoothness_loss)  # Log smoothness loss
         return train_loss
 
     def sample(
