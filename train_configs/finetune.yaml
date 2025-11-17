@@ -17,7 +17,7 @@ shared_parameters:
 model_path: /workspace/finetune_small_mpinets_hybrid_training_data_smoothness_v2/2nu2d49z/epoch=0-step=11355.ckpt
 checkpoint_interval: 10
 validation_interval: 50
-gpus: 2 # If > 1, will use DDP for training.
+gpus: 1 # If > 1, will use DDP for training.
 batch_size: 48
 save_checkpoint_dir: /workspace/finetune_best_bin_60k
 max_epochs: 50
