@@ -25,7 +25,7 @@ from mpinets import utils
 from mpinets.geometry import TorchCuboids, TorchCylinders
 import torch.nn.functional as F
 import torch
-from utils import FrankaSampler
+from mpinets.utils import FrankaSampler
 
 
 def point_match_loss(input_pc: torch.Tensor, target_pc: torch.Tensor) -> torch.Tensor:
