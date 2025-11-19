@@ -87,81 +87,67 @@ def extract_obstacle_data(obstacles):
     return obstacle_data
 
 
+def get_tool_parameters(problem):
+    """
+    Extract tool parameters for either single primitive or composite tools
+    Returns a dictionary of tool parameters.
+    """
+    if not hasattr(problem, "tool") or problem.tool is None:
+        # No tool
+        return {
+            "is_composite": False,
+            "tool_dims": [0.0, 0.0, 0.0],
+            "tool_offsets": [0.0, 0.0, 0.0],
+            "tool_quats": [1.0, 0.0, 0.0, 0.0],
+            "tool_num_primitives": 0,
+        }
+
+    primitives = problem.tool.primitives
+    if len(primitives) == 1:
+        # Single primitive tool
+        primitive = primitives[0]
+        return {
+            "is_composite": False,
+            "tool_dims": primitive["dims"],
+            "tool_offsets": primitive["offset"],
+            "tool_quats": primitive["offset_quaternion"],
+            "tool_num_primitives": 1,
+        }
+    else:
+        # Composite tool with multiple primitives
+        tool_dims = []
+        tool_offsets = []
+        tool_quats = []
+
+        for primitive in primitives:
+            tool_dims.append(primitive["dims"])
+            tool_offsets.append(primitive["offset"])
+            tool_quats.append(primitive["offset_quaternion"])
+
+        return {
+            "is_composite": True,
+            "tool_dims": tool_dims,
+            "tool_offsets": tool_offsets,
+            "tool_quats": tool_quats,
+            "tool_num_primitives": len(primitives),
+        }
+
+
 def extract_tool_data(problem):
-    """Extract tool data from problem (dimensions, offsets, quaternions, num_primitives)"""
-    tool_data = {}
+    """Extract tool data from problem using the same method as run_inference.py"""
+    tool_params = get_tool_parameters(problem)
 
-    # Extract start tool data
-    if hasattr(problem, "start_tool_dims"):
-        tool_data["start_tool_dims"] = (
-            problem.start_tool_dims.tolist()
-            if hasattr(problem.start_tool_dims, "tolist")
-            else problem.start_tool_dims
-        )
-    else:
-        tool_data["start_tool_dims"] = [[0.0, 0.0, 0.0]]  # Default
-
-    if hasattr(problem, "start_tool_offset"):
-        tool_data["start_tool_offset"] = (
-            problem.start_tool_offset.tolist()
-            if hasattr(problem.start_tool_offset, "tolist")
-            else problem.start_tool_offset
-        )
-    else:
-        tool_data["start_tool_offset"] = [[0.0, 0.0, 0.0]]  # Default
-
-    if hasattr(problem, "start_tool_quaternion"):
-        tool_data["start_tool_quaternion"] = (
-            problem.start_tool_quaternion.tolist()
-            if hasattr(problem.start_tool_quaternion, "tolist")
-            else problem.start_tool_quaternion
-        )
-    else:
-        tool_data["start_tool_quaternion"] = [
-            [1.0, 0.0, 0.0, 0.0]
-        ]  # Default identity quaternion
-
-    if hasattr(problem, "start_tool_num_primitives"):
-        tool_data["start_tool_num_primitives"] = int(problem.start_tool_num_primitives)
-    else:
-        tool_data["start_tool_num_primitives"] = 1
-
-    # Extract target tool data
-    if hasattr(problem, "target_tool_dims"):
-        tool_data["target_tool_dims"] = (
-            problem.target_tool_dims.tolist()
-            if hasattr(problem.target_tool_dims, "tolist")
-            else problem.target_tool_dims
-        )
-    else:
-        tool_data["target_tool_dims"] = [[0.0, 0.0, 0.0]]  # Default
-
-    if hasattr(problem, "target_tool_offset"):
-        tool_data["target_tool_offset"] = (
-            problem.target_tool_offset.tolist()
-            if hasattr(problem.target_tool_offset, "tolist")
-            else problem.target_tool_offset
-        )
-    else:
-        tool_data["target_tool_offset"] = [[0.0, 0.0, 0.0]]  # Default
-
-    if hasattr(problem, "target_tool_quaternion"):
-        tool_data["target_tool_quaternion"] = (
-            problem.target_tool_quaternion.tolist()
-            if hasattr(problem.target_tool_quaternion, "tolist")
-            else problem.target_tool_quaternion
-        )
-    else:
-        tool_data["target_tool_quaternion"] = [
-            [1.0, 0.0, 0.0, 0.0]
-        ]  # Default identity quaternion
-
-    if hasattr(problem, "target_tool_num_primitives"):
-        tool_data["target_tool_num_primitives"] = int(
-            problem.target_tool_num_primitives
-        )
-    else:
-        tool_data["target_tool_num_primitives"] = 1
+    # Convert to the format expected by the rest of the code
+    tool_data = {
+        "start_tool_dims": tool_params["tool_dims"],
+        "start_tool_offset": tool_params["tool_offsets"],
+        "start_tool_quaternion": tool_params["tool_quats"],
+        "start_tool_num_primitives": tool_params["tool_num_primitives"],
+        "target_tool_dims": tool_params["tool_dims"],  # Same tool for start and target
+        "target_tool_offset": tool_params["tool_offsets"],
+        "target_tool_quaternion": tool_params["tool_quats"],
+        "target_tool_num_primitives": tool_params["tool_num_primitives"],
+    }
 
     return tool_data
 
@@ -387,7 +373,7 @@ def save_trajectory_for_problem(
     # Get specific problem
     problem = all_problems[environment_type][problem_type][problem_index]
 
-    # Extract tool data and convert to tool parameters
+    # Extract tool data using the corrected method
     tool_data = extract_tool_data(problem)
     tool_params_start = get_tool_parameters_from_data(tool_data, is_start=True)
     tool_params_target = get_tool_parameters_from_data(tool_data, is_start=False)
