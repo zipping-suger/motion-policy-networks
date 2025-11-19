@@ -5,7 +5,7 @@ training_model_parameters:
     collision_loss_weight: 5
 
 data_module_parameters:
-  data_dir: /data/cubby_45k
+  data_dir: /data/bin_60k
   trajectory_key: 'global_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
@@ -14,12 +14,12 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: /workspace/pretrain_cubby_45k_tool/zq1b7oye/epoch=3-step=531398.ckpt
+model_path: /workspace/pretrain_bin_60k/taipr7on/epoch-epoch=2-end.ckpt
 checkpoint_interval: 10
 validation_interval: 50
-gpus: 1 # If > 1, will use DDP for training.
+gpus: 2 # If > 1, will use DDP for training.
 batch_size: 48
-save_checkpoint_dir: /workspace/finetune_pretrain_cubby_45k_tool
+save_checkpoint_dir: /workspace/finetune_pretrain_bin_60k_tool
 max_epochs: 50
-experiment_name: finetune_pretrain_cubby_45k_tool
-description: "finetune pretrained model so far on cubby_45k dataset with diverse tools"
+experiment_name: finetune_pretrain_bin_60k_tool
+description: "finetune pretrained model so far on bin_60k dataset with diverse tools"
