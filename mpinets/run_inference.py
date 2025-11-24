@@ -275,13 +275,13 @@ def calculate_metrics(
             eval.create_new_group(f"{scene_type}, {problem_type}")
             for problem_idx, problem in enumerate(tqdm(problem_set, leave=False)):
                 try:
-                    # print("Target pose:", problem.target.matrix)
-                    # Calculate target xyz (position)
-                    target_xyz = problem.target.xyz
-                    # Calculate target xyzw (orientation)
-                    target_xyzw = problem.target.so3.xyzw
-                    print("Target XYZ:", target_xyz)
-                    print("Target QUAT (xyzw):", target_xyzw)
+                    # # print("Target pose:", problem.target.matrix)
+                    # # Calculate target xyz (position)
+                    # target_xyz = problem.target.xyz
+                    # # Calculate target xyzw (orientation)
+                    # target_xyzw = problem.target.so3.xyzw
+                    # print("Target XYZ:", target_xyz)
+                    # print("Target QUAT (xyzw):", target_xyzw)
                      
                     
                     if problem.obstacle_point_cloud is None:
