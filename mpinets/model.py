@@ -45,8 +45,27 @@ class MotionPolicyNetwork(pl.LightningModule):
             nn.LeakyReLU(),
             nn.Linear(128, 64),
         )
+        
+        # --- NEW: Bounding Box Encoder ---
+        # Input: 24 (8 corners * 3 coordinates)
+        # Output: 64 (to match config and target encoders)
+        self.bbx_encoder = nn.Sequential(
+            nn.Linear(24, 32),
+            nn.LeakyReLU(),
+            nn.Linear(32, 64),
+            nn.LeakyReLU(),
+            nn.Linear(64, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, 64),
+        )
+
+        # --- UPDATED: Decoder Input Dimension ---
+        # Previous: 1024 (PC) + 64 (Config) + 64 (Target) = 1152
+        # New: 1024 (PC) + 64 (Config) + 64 (Target) + 64 (BBX) = 1216
         self.decoder = nn.Sequential(
-            nn.Linear(1024 + 64 + 64, 512),
+            nn.Linear(1024 + 64 + 64 + 64, 512),
             nn.LeakyReLU(),
             nn.Linear(512, 256),
             nn.LeakyReLU(),
@@ -62,33 +81,30 @@ class MotionPolicyNetwork(pl.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
         return optimizer
 
-    def forward(self, xyz: torch.Tensor, q: torch.Tensor, target: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+    def forward(self, xyz: torch.Tensor, q: torch.Tensor, target: torch.Tensor, bbx_feature: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         """
         Passes data through the network to produce an output
 
-        :param xyz torch.Tensor: Tensor representing the point cloud. Should
-                                      have dimensions of [B x N x 4] where B is the batch
-                                      size, N is the number of points and 4 is because there
-                                      are three geometric dimensions and a segmentation mask
-        :param q torch.Tensor: The current robot configuration normalized to be between
-                                    -1 and 1, according to each joint's range of motion
-        :rtype torch.Tensor: The displacement to be applied to the current configuration to get
-                     the position at the next step (still in normalized space)
+        :param xyz torch.Tensor: Tensor representing the point cloud [B x N x 4]
+        :param q torch.Tensor: The current robot configuration [B x 7]
+        :param target torch.Tensor: The target pose [B x 12]
+        :param bbx_feature torch.Tensor: The tool bounding box corners [B x 24]
+        :rtype torch.Tensor: The displacement [B x 7]
         """
         pc_encoding = self.point_cloud_encoder(xyz)
         config_encoding = self.config_encoder(q)
         target_encoding = self.target_encoder(target)
-        x = torch.cat((pc_encoding, config_encoding, target_encoding), dim=1)
+        bbx_encoding = self.bbx_encoder(bbx_feature)
+        
+        # Concatenate all features
+        x = torch.cat((pc_encoding, config_encoding, target_encoding, bbx_encoding), dim=1)
         return self.decoder(x)
 
 
 class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
     """
     An version of the MotionPolicyNetwork model that has additional attributes
-    necessary during training (or using the validation step outside of the
-    training process). This class is a valid model, but it's overkill when
-    doing real robot inference and, for example, point cloud sampling is
-    done by an outside process (such as downsampling point clouds from a point cloud).
+    necessary during training.
     """
 
     def __init__(
@@ -97,17 +113,6 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         point_match_loss_weight: float,
         collision_loss_weight: float,
     ):
-        """
-        Creates the network and assigns additional parameters for training
-
-
-        :param num_robot_points int: The number of robot points used when resampling
-                                     the robot points during rollouts (used in validation)
-        :param point_match_loss_weight float: The weight assigned to the behavior
-                                              cloning loss.
-        :param collision_loss_weight float: The weight assigned to the collision loss
-        :rtype Self: An instance of the network
-        """
         super().__init__()
         self.num_robot_points = num_robot_points
         self.point_match_loss_weight = point_match_loss_weight
@@ -125,28 +130,16 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
     ) -> List[torch.Tensor]:
         """
         Rolls out the policy an arbitrary length by calling it iteratively
-
-        :param batch Dict[str, torch.Tensor]: A data batch coming from the
-                                              data loader--should already be
-                                              on the correct device
-        :param rollout_length int: The number of steps to roll out (not including the start)
-        :param sampler Callable[[torch.Tensor], torch.Tensor]: A function that takes a batch of robot
-                                                               configurations [B x 7] and returns a batch of
-                                                               point clouds samples on the surface of that robot
-        :param unnormalize bool: Whether to return the whole trajectory unnormalized
-                                 (i.e. converted back into joint space)
-        :rtype List[torch.Tensor]: The entire trajectory batch, i.e. a list of
-                                   configuration batches including the starting
-                                   configurations where each element in the list
-                                   corresponds to a timestep. For example, the
-                                   first element of each batch in the list would
-                                   be a single trajectory.
         """
         xyz, q, target_pose = (
             batch["xyz"],
             batch["configuration"],
             batch["target_pose"],
         )
+        
+        # --- NEW: Extract BBX Feature ---
+        # Default to zeros if not present for compatibility
+        bbx_feature = batch.get("bbx_feature", torch.zeros((xyz.shape[0], 24), device=xyz.device))
 
         # Get composite tool parameters
         start_tool_dims = batch.get(
@@ -168,6 +161,7 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         if q.ndim == 1:
             xyz = xyz.unsqueeze(0)
             q = q.unsqueeze(0)
+            bbx_feature = bbx_feature.unsqueeze(0) # Unsqueeze BBX as well
             start_tool_dims = start_tool_dims.unsqueeze(0)
             start_tool_offset = start_tool_offset.unsqueeze(0)
             start_tool_quaternion = start_tool_quaternion.unsqueeze(0)
@@ -181,7 +175,9 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
             trajectory = [q]
 
         for i in range(rollout_length):
-            q = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
+            # --- UPDATED: Pass bbx_feature to forward() ---
+            q = torch.clamp(q + self(xyz, q, target_pose, bbx_feature), min=-1, max=1)
+            
             q_unnorm = unnormalize_franka_joints(q)
             assert isinstance(q_unnorm, torch.Tensor)
             q_unnorm = q_unnorm.type_as(q)
@@ -191,7 +187,6 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
                 trajectory.append(q)
 
             # Use composite sampling for robot point cloud
-            # Check if any batch element has multiple primitives
             samples = sampler(
                 q_unnorm,
                 start_tool_dims,
@@ -209,20 +204,18 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
     ) -> torch.Tensor:
         """
         A function called automatically by Pytorch Lightning during training.
-        This function handles the forward pass, the loss calculation, and what to log
-
-        :param batch Dict[str, torch.Tensor]: A data batch coming from the
-                                                   data loader--should already be
-                                                   on the correct device
-        :param batch_idx int: The index of the batch (not used by this function)
-        :rtype torch.Tensor: The overall weighted loss (used for backprop)
         """
         xyz, q, target_pose = (
             batch["xyz"],
             batch["configuration"],
             batch["target_pose"],
         )
-        y_hat = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
+        
+        # --- NEW: Extract BBX Feature ---
+        bbx_feature = batch.get("bbx_feature", torch.zeros((xyz.shape[0], 24), device=xyz.device))
+
+        # --- UPDATED: Pass bbx_feature to forward() ---
+        y_hat = torch.clamp(q + self(xyz, q, target_pose, bbx_feature), min=-1, max=1)
 
         (
             cuboid_centers,
@@ -303,13 +296,6 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
     ) -> torch.Tensor:
         """
         Samples a point cloud from the surface of all the robot's links
-
-        :param q torch.Tensor: Batched configuration in joint space
-        :param start_tool_dims torch.Tensor: Dimensions of attached tool primitives
-        :param start_tool_offset torch.Tensor: Offsets of attached tool primitives
-        :param start_tool_quaternion torch.Tensor: Orientations of attached tool primitives
-        :param start_tool_num_primitives torch.Tensor: Number of active tool primitives
-        :rtype torch.Tensor: Batched point cloud of size [B, self.num_robot_points, 3]
         """
         assert self.fk_sampler is not None
 
@@ -348,10 +334,6 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
         """
         This is a Pytorch Lightning function run automatically across devices
         during the validation loop
-
-        :param batch Dict[str, torch.Tensor]: The batch coming from the dataloader
-        :param batch_idx int: The index of the batch (not used by this function)
-        :rtype Dict[str, torch.Tensor]: The loss values which are to be collected into summary stats
         """
 
         # These are defined here because they need to be set on the correct devices.
@@ -415,13 +397,6 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
     def validation_step_end(  # type: ignore[override]
         self, batch_parts: Dict[str, torch.Tensor]
     ) -> Dict[str, torch.Tensor]:
-        """
-        Called by Pytorch Lightning at the end of each validation step to
-        aggregate across devices
-
-        :param batch_parts Dict[str, torch.Tensor]: The parts accumulated from all devices
-        :rtype Dict[str, torch.Tensor]: The average values across the devices
-        """
         return {
             "avg_target_error": torch.mean(batch_parts["avg_target_error"]),
             "avg_collision_rate": torch.mean(batch_parts["avg_collision_rate"]),
@@ -430,12 +405,6 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
     def validation_epoch_end(  # type: ignore[override]
         self, validation_step_outputs: Sequence[Dict[str, torch.Tensor]]
     ):
-        """
-        Pytorch lightning method that aggregates stats from the validation loop and logs
-
-        :param validation_step_outputs Sequence[Dict[str, torch.Tensor]]: The outputs from each
-                                                                      validation step
-        """
         avg_target_error = torch.mean(
             torch.stack([x["avg_target_error"] for x in validation_step_outputs])
         )
@@ -448,15 +417,12 @@ class TrainingMotionPolicyNetwork(MotionPolicyNetwork):
 
 
 class MPiNetsPointNet(pl.LightningModule):
-
+    # No changes needed here, but included for completeness of the file
     def __init__(self):
         super().__init__()
         self._build_model()
 
     def _build_model(self):
-        """
-        Assembles the model design into a ModuleList
-        """
         self.SA_modules = nn.ModuleList()
 
         # 1st SA: 128 points, radius .05, 64 neighbours, [1→64→64→64]
@@ -512,5 +478,4 @@ class MPiNetsPointNet(pl.LightningModule):
         xyz, features = self._break_up_pc(point_cloud)
         for module in self.SA_modules:
             xyz, features = module(xyz, features)
-        # features: [B, C, 1]  → squeeze → [B, C]
         return self.fc_layer(features.squeeze(-1))

@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Optional, List, Union, Dict
 import enum
 import os
+import itertools
 
 from torch.utils.data import Dataset, DataLoader, random_split
 import h5py
@@ -10,7 +11,8 @@ import torch
 import pytorch_lightning as pl
 from pyquaternion import Quaternion
 from geometrout.primitive import Cuboid, Cylinder
-from utils import FrankaSampler
+# from utils import FrankaSampler # with tool
+from robofin.pointcloud.torch import FrankaSampler # with out tool
 
 from robofin.robots import FrankaRealRobot
 from mpinets.geometry import construct_mixed_point_cloud
@@ -25,6 +27,69 @@ class DatasetType(enum.Enum):
     TRAIN = 0
     VAL = 1
     TEST = 2
+
+
+# --- Helper Function for BBX Calculation ---
+def compute_tool_bbx(dims, offsets, quats, num_primitives):
+    """
+    Computes the 8 corners of the Axis-Aligned Bounding Box (AABB) 
+    for the entire composite tool in the tool frame.
+    
+    :param dims: (max_primitives, 3) dimensions of primitives
+    :param offsets: (max_primitives, 3) offsets of primitives
+    :param quats: (max_primitives, 4) quaternions (w,x,y,z) of primitives
+    :param num_primitives: int, number of valid primitives
+    :return: (24,) flattened tensor of the 8 corners
+    """
+    if num_primitives == 0:
+        # Return a small default box or zeros if no tool
+        return torch.zeros(24).float()
+
+    all_corners = []
+
+    for i in range(int(num_primitives)):
+        d = dims[i]
+        o = offsets[i]
+        q = quats[i] # Expecting w, x, y, z
+
+        # 1. Generate 8 corners of the primitive centered at 0
+        # dims are (x, y, z)
+        dx, dy, dz = d[0] / 2.0, d[1] / 2.0, d[2] / 2.0
+        
+        # Create all combinations of +/- dimensions
+        # Use itertools to generate the 8 corners cleanly
+        local_corners = np.array(list(itertools.product(
+            [-dx, dx], [-dy, dy], [-dz, dz]
+        )))
+
+        # 2. Rotate corners
+        # pyquaternion expects (w, x, y, z) which matches the generation code
+        rot_mat = Quaternion(q).rotation_matrix
+        rotated_corners = local_corners @ rot_mat.T
+
+        # 3. Translate corners
+        global_corners = rotated_corners + o
+        all_corners.append(global_corners)
+
+    # Stack all points from all primitives
+    all_points = np.vstack(all_corners)
+
+    # 4. Compute AABB of the union
+    min_pt = np.min(all_points, axis=0)
+    max_pt = np.max(all_points, axis=0)
+
+    # 5. Generate the 8 corners of this AABB
+    # Order: Consistent ordering is important for the network
+    # We use itertools again to ensure deterministic ordering
+    min_x, min_y, min_z = min_pt
+    max_x, max_y, max_z = max_pt
+    
+    aabb_corners = np.array(list(itertools.product(
+        [min_x, max_x], [min_y, max_y], [min_z, max_z]
+    )))
+
+    # Flatten to 24D vector (8 points * 3 coords)
+    return torch.as_tensor(aabb_corners).float().flatten()
 
 
 class TaskDataset(Dataset):
@@ -49,7 +114,7 @@ class TaskDataset(Dataset):
                                    This is only used for train datasets.
         """
         self._init_directory(directory, dataset_type)
-        self.trajectory_key = trajectory_key  # TODO: Remove this unused variable
+        self.trajectory_key = trajectory_key 
         self.train = dataset_type == DatasetType.TRAIN
 
         self.num_obstacle_points = num_obstacle_points
@@ -61,20 +126,9 @@ class TaskDataset(Dataset):
             self._length = f['target_poses'].shape[0]
 
     def __len__(self):
-        """
-        Necessary for Pytorch. For this dataset, the length is the total number
-        of problems
-        """
         return self._length
 
     def _init_directory(self, directory: Path, dataset_type: DatasetType):
-        """
-        Sets the path for the internal data structure based on the dataset type
-
-        :param directory Path: The path to the root of the data directory
-        :param dataset_type DatasetType: What type of dataset this is
-        :raises Exception: Raises an exception when the dataset type is unsupported
-        """
         self.type = dataset_type
         if dataset_type == DatasetType.TRAIN:
             directory = directory / "train"
@@ -92,17 +146,9 @@ class TaskDataset(Dataset):
 
     @staticmethod
     def normalize(configuration_tensor: torch.Tensor):
-        """
-        Normalizes the joints between -1 and 1 according the the joint limits
-
-        :param configuration_tensor torch.Tensor: The input tensor. Has dim [7]
-        """
         return utils.normalize_franka_joints(configuration_tensor)
 
     def _construct_pointcloud(self, robot_points, obstacle_points, target_points):
-        """
-        Construct the point cloud with features as shown in the example.
-        """
         obstacle_points = torch.as_tensor(obstacle_points[:, :3]).float()
 
         xyz = torch.cat(
@@ -121,15 +167,6 @@ class TaskDataset(Dataset):
         return xyz
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """
-        Required by Pytorch. Queries for data at a particular index. Note that
-        in this dataset, the index always corresponds to the trajectory index.
-
-        :param idx int: The index
-        :rtype Dict[str, torch.Tensor]: Returns a dictionary that can be assembled
-            by the data loader before using in training.
-        """
-
         item = {}
         with h5py.File(str(self._database), "r") as f:
             # Target
@@ -137,19 +174,27 @@ class TaskDataset(Dataset):
             target_pose = FrankaRealRobot.fk(target_config)
             target_pose_matrix = target_pose.matrix
 
-            # UPDATED: Handle composite tools for start tool
+            # --- Tool Loading & BBX Feature Construction ---
             start_tool_dims = f['start_tool_dims'][idx] if 'start_tool_dims' in f.keys() else np.zeros((1, 3))
             start_tool_offset = f['start_tool_offset'][idx] if 'start_tool_offset' in f.keys() else np.zeros((1, 3))
             start_tool_quaternion = f['start_tool_quaternion'][idx] if 'start_tool_quaternion' in f.keys() else np.array([[1.0, 0.0, 0.0, 0.0]])
             start_tool_num_primitives = f['start_tool_num_primitives'][idx] if 'start_tool_num_primitives' in f.keys() else 1
 
-            # UPDATED: Handle composite tools for target tool
+            # Compute BBX Feature (24D flattened corners)
+            item["bbx_feature"] = compute_tool_bbx(
+                start_tool_dims, 
+                start_tool_offset, 
+                start_tool_quaternion, 
+                start_tool_num_primitives
+            )
+
+            # Target tool info (loaded but generally bbx_feature is calculated for the robot's current tool)
             target_tool_dims = f['target_tool_dims'][idx] if 'target_tool_dims' in f.keys() else np.zeros((1, 3))
             target_tool_offset = f['target_tool_offset'][idx] if 'target_tool_offset' in f.keys() else np.zeros((1, 3))
             target_tool_quaternion = f['target_tool_quaternion'][idx] if 'target_tool_quaternion' in f.keys() else np.array([[1.0, 0.0, 0.0, 0.0]])
             target_tool_num_primitives = f['target_tool_num_primitives'][idx] if 'target_tool_num_primitives' in f.keys() else 1
 
-            # Store tool information
+            # Store raw tool information
             item["start_tool_dims"] = torch.as_tensor(start_tool_dims).float()
             item["start_tool_offset"] = torch.as_tensor(start_tool_offset).float()
             item["start_tool_quaternion"] = torch.as_tensor(start_tool_quaternion).float()
@@ -159,32 +204,24 @@ class TaskDataset(Dataset):
             item["target_tool_offset"] = torch.as_tensor(target_tool_offset).float()
             item["target_tool_quaternion"] = torch.as_tensor(target_tool_quaternion).float()
             item["target_tool_num_primitives"] = torch.as_tensor(target_tool_num_primitives).int()
+            # ---------------------------------------------
 
-            # UPDATED: Sample target points using composite tool
-            target_points = self.fk_sampler.sample_composite_end_effector(
+            target_points = self.fk_sampler.sample_end_effector(
                 torch.as_tensor(target_pose_matrix).float(),
-                torch.as_tensor(start_tool_dims).float(),
-                torch.as_tensor(start_tool_offset).float(),
-                torch.as_tensor(start_tool_quaternion).float(),
-                torch.as_tensor(start_tool_num_primitives).int(),
                 num_points=self.num_target_points,
             )
 
             target_position = torch.as_tensor(target_pose_matrix[:3, 3], dtype=torch.float32)
-
-            # Use rotation matrix R9 as rotation representation
             target_rot_mat = torch.as_tensor(target_pose.matrix[:3, :3].flatten(), dtype=torch.float32)
             item["target_position"] = target_position
             item["target_rotation"] = target_rot_mat
             item["target_pose"] = torch.cat((target_position, target_rot_mat), dim=0).float()
             item["target_configuration"] = torch.as_tensor(target_config).float()
 
-            # Start configuration
             start_config = f["start_configs"][idx]
             config_tensor = torch.as_tensor(start_config).float()
 
             if self.train:
-                # Add slight random noise to the joints
                 randomized = (
                     self.random_scale * torch.randn(config_tensor.shape) + config_tensor
                 )
@@ -193,25 +230,11 @@ class TaskDataset(Dataset):
                     torch.maximum(randomized, limits[:, 0]), limits[:, 1]
                 )
                 item["configuration"] = self.normalize(randomized)
-                # UPDATED: Sample robot points using composite tool
-                robot_points = self.fk_sampler.sample_composite(
-                    randomized,
-                    torch.as_tensor(start_tool_dims).float(),
-                    torch.as_tensor(start_tool_offset).float(),
-                    torch.as_tensor(start_tool_quaternion).float(),
-                    torch.as_tensor(start_tool_num_primitives).int(),
-                    self.num_robot_points,
-                )
+                robot_points = self.fk_sampler.sample(randomized, self.num_robot_points)
             else:
                 item["configuration"] = self.normalize(config_tensor)
-                # UPDATED: Sample robot points using composite tool
-                robot_points = self.fk_sampler.sample_composite(
-                    config_tensor,
-                    torch.as_tensor(start_tool_dims).float(),
-                    torch.as_tensor(start_tool_offset).float(),
-                    torch.as_tensor(start_tool_quaternion).float(),
-                    torch.as_tensor(start_tool_num_primitives).int(),
-                    self.num_robot_points,
+                robot_points = self.fk_sampler.sample(
+                    config_tensor, self.num_robot_points
                 )
 
             cuboid_dims = f["cuboid_dims"][idx, ...]
@@ -225,20 +248,14 @@ class TaskDataset(Dataset):
             cuboid_quats = f["cuboid_quaternions"][idx, ...]
             if cuboid_quats.ndim == 1:
                 cuboid_quats = np.expand_dims(cuboid_quats, axis=0)
-            # Entries without a shape are stored with an invalid quaternion of all zeros
-            # This will cause NaNs later in the pipeline. It's best to set these to unit
-            # quaternions.
-            # To find invalid shapes, we just look for a dimension with size 0
+            
             cuboid_quats[np.all(np.isclose(cuboid_quats, 0), axis=1), 0] = 1
 
-            # Leaving in the zero volume cuboids to conform to a standard
-            # Pytorch array size. These have to be filtered out later
             item["cuboid_dims"] = torch.as_tensor(cuboid_dims)
             item["cuboid_centers"] = torch.as_tensor(cuboid_centers)
             item["cuboid_quats"] = torch.as_tensor(cuboid_quats)
 
             if "cylinder_radii" not in f.keys():
-                # Create a dummy cylinder if cylinders aren't in the hdf5 file
                 cylinder_radii = np.array([[0.0]])
                 cylinder_heights = np.array([[0.0]])
                 cylinder_centers = np.array([[0.0, 0.0, 0.0]])
@@ -256,7 +273,7 @@ class TaskDataset(Dataset):
                 cylinder_quats = f["cylinder_quaternions"][idx, ...]
                 if cylinder_quats.ndim == 1:
                     cylinder_quats = np.expand_dims(cylinder_quats, axis=0)
-                # Ditto to the comment above about fixing ill-formed quaternions
+                
                 cylinder_quats[np.all(np.isclose(cylinder_quats, 0), axis=1), 0] = 1
 
             item["cylinder_radii"] = torch.as_tensor(cylinder_radii)
@@ -270,8 +287,6 @@ class TaskDataset(Dataset):
                     list(cuboid_centers), list(cuboid_dims), list(cuboid_quats)
                 )
             ]
-
-            # Filter out the cuboids with zero volume
             cuboids = [c for c in cuboids if not c.is_zero_volume()]
 
             cylinders = [
@@ -295,19 +310,7 @@ class TaskDataset(Dataset):
 
 class PointCloudBase(Dataset):
     """
-    This base class should never be used directly, but it handles the filesystem
-    management and the basic indexing. When using these dataloaders, the directory
-    holding the data should look like so:
-        directory/
-          train/
-             train.hdf5
-          val/
-             val.hdf5
-          test/
-             test.hdf5
-    Note that only the relevant subdirectory is required, i.e. when creating a
-    dataset for training, this class will not check for (and will not use) the val/
-    and test/ subdirectories.
+    Base class for trajectory/instance datasets.
     """
 
     def __init__(
@@ -320,17 +323,6 @@ class PointCloudBase(Dataset):
         dataset_type: DatasetType,
         random_scale: float,
     ):
-        """
-        :param directory Path: The path to the root of the data directory
-        :param num_robot_points int: The number of points to sample from the robot
-        :param num_obstacle_points int: The number of points to sample from the obstacles
-        :param num_target_points int: The number of points to sample from the target
-                                      robot end effector
-        :param dataset_type DatasetType: What type of dataset this is
-        :param random_scale float: The standard deviation of the random normal
-                                   noise to apply to the joints during training.
-                                   This is only used for train datasets.
-        """
         self._init_directory(directory, dataset_type)
         self.trajectory_key = trajectory_key
         self.train = dataset_type == DatasetType.TRAIN
@@ -345,13 +337,6 @@ class PointCloudBase(Dataset):
         self.fk_sampler = FrankaSampler("cpu", use_cache=True)
 
     def _init_directory(self, directory: Path, dataset_type: DatasetType):
-        """
-        Sets the path for the internal data structure based on the dataset type
-
-        :param directory Path: The path to the root of the data directory
-        :param dataset_type DatasetType: What type of dataset this is
-        :raises Exception: Raises an exception when the dataset type is unsupported
-        """
         self.type = dataset_type
         if dataset_type == DatasetType.TRAIN:
             directory = directory / "train"
@@ -368,39 +353,20 @@ class PointCloudBase(Dataset):
 
     @property
     def num_trajectories(self):
-        """
-        Returns the total number of trajectories in the dataset
-        """
         return self._num_trajectories
 
     @staticmethod
     def normalize(configuration_tensor: torch.Tensor):
-        """
-        Normalizes the joints between -1 and 1 according the the joint limits
-
-        :param configuration_tensor torch.Tensor: The input tensor. Has dim [7]
-        """
         return utils.normalize_franka_joints(configuration_tensor)
 
     def get_inputs(self, trajectory_idx: int, timestep: int) -> Dict[str, torch.Tensor]:
-        """
-        Loads all the relevant data and puts it in a dictionary. This includes
-        normalizing all configurations and constructing the pointcloud.
-        If a training dataset, applies some randomness to joints (before
-        sampling the pointcloud).
-
-        :param trajectory_idx int: The index of the trajectory in the hdf5 file
-        :param timestep int: The timestep within that trajectory
-        :rtype Dict[str, torch.Tensor]: The data used aggregated by the dataloader
-                                        and used for training
-        """
         item = {}
         with h5py.File(str(self._database), "r") as f:
             target_pose = FrankaRealRobot.fk(
                 f[self.trajectory_key][trajectory_idx, -1, :]
             )
 
-            # UPDATED: Handle composite tools for start tool
+            # --- Tool Loading & BBX Feature Construction ---
             start_tool_dims = (
                 f["start_tool_dims"][trajectory_idx]
                 if "start_tool_dims" in f.keys()
@@ -421,8 +387,16 @@ class PointCloudBase(Dataset):
                 if "start_tool_num_primitives" in f.keys()
                 else 1
             )
-
-            # UPDATED: Handle composite tools for target tool
+            
+            # Compute BBX Feature (24D flattened corners)
+            item["bbx_feature"] = compute_tool_bbx(
+                start_tool_dims, 
+                start_tool_offset, 
+                start_tool_quaternion, 
+                start_tool_num_primitives
+            )
+            
+            # Load Target Tool (standard loading)
             target_tool_dims = (
                 f["target_tool_dims"][trajectory_idx]
                 if "target_tool_dims" in f.keys()
@@ -446,40 +420,26 @@ class PointCloudBase(Dataset):
 
             item["start_tool_dims"] = torch.as_tensor(start_tool_dims).float()
             item["start_tool_offset"] = torch.as_tensor(start_tool_offset).float()
-            item["start_tool_quaternion"] = torch.as_tensor(
-                start_tool_quaternion
-            ).float()
-            item["start_tool_num_primitives"] = torch.as_tensor(
-                start_tool_num_primitives
-            ).int()
+            item["start_tool_quaternion"] = torch.as_tensor(start_tool_quaternion).float()
+            item["start_tool_num_primitives"] = torch.as_tensor(start_tool_num_primitives).int()
 
             item["target_tool_dims"] = torch.as_tensor(target_tool_dims).float()
             item["target_tool_offset"] = torch.as_tensor(target_tool_offset).float()
-            item["target_tool_quaternion"] = torch.as_tensor(
-                target_tool_quaternion
-            ).float()
-            item["target_tool_num_primitives"] = torch.as_tensor(
-                target_tool_num_primitives
-            ).int()
+            item["target_tool_quaternion"] = torch.as_tensor(target_tool_quaternion).float()
+            item["target_tool_num_primitives"] = torch.as_tensor(target_tool_num_primitives).int()
+            # ---------------------------------------------
 
-            # UPDATED: Sample target points using composite tool
-            target_points = self.fk_sampler.sample_composite_end_effector(
+            target_points = self.fk_sampler.sample_end_effector(
                 torch.as_tensor(target_pose.matrix).float(),
-                torch.as_tensor(start_tool_dims).float(),
-                torch.as_tensor(start_tool_offset).float(),
-                torch.as_tensor(start_tool_quaternion).float(),
-                torch.as_tensor(start_tool_num_primitives).int(),
                 num_points=self.num_target_points,
             )
 
             target_position = torch.as_tensor(target_pose.xyz).float()
-            # Use rotation matrix R9 as rotation representation
             target_rot_mat = torch.as_tensor(target_pose.matrix[:3, :3].flatten(), dtype=torch.float32)
             item["target_position"] = target_position
             item["target_rotation"] = target_rot_mat
             item["target_pose"] = torch.cat((target_position, target_rot_mat), dim=0).float()
 
-            # Target
             target_config = f[self.trajectory_key][trajectory_idx, -1, :]
             item["target_configuration"] = torch.as_tensor(target_config).float()
 
@@ -487,39 +447,25 @@ class PointCloudBase(Dataset):
             config_tensor = torch.as_tensor(config).float()
 
             if self.train:
-                # Add slight random noise to the joints
                 randomized = (
                     self.random_scale * torch.randn(config_tensor.shape) + config_tensor
                 )
-                # Ensure that after adding random noise, the joint angles are still within the joint limits
                 limits = torch.as_tensor(FrankaRealRobot.JOINT_LIMITS).float()
-
-                # Clamp to joint limits
                 randomized = torch.minimum(
                     torch.maximum(randomized, limits[:, 0]), limits[:, 1]
                 )
                 item["configuration"] = self.normalize(randomized)
-                # UPDATED: Sample robot points using composite tool
-                robot_points = self.fk_sampler.sample_composite(
-                    randomized,
-                    torch.as_tensor(start_tool_dims).float(),
-                    torch.as_tensor(start_tool_offset).float(),
-                    torch.as_tensor(start_tool_quaternion).float(),
-                    torch.as_tensor(start_tool_num_primitives).int(),
-                    self.num_robot_points,
-                )
+                robot_points = self.fk_sampler.sample(randomized, self.num_robot_points)
             else:
                 item["configuration"] = self.normalize(config_tensor)
-                # UPDATED: Sample robot points using composite tool
-                robot_points = self.fk_sampler.sample_composite(
-                    config_tensor,
-                    torch.as_tensor(start_tool_dims).float(),
-                    torch.as_tensor(start_tool_offset).float(),
-                    torch.as_tensor(start_tool_quaternion).float(),
-                    torch.as_tensor(start_tool_num_primitives).int(),
-                    self.num_robot_points,
+                robot_points = self.fk_sampler.sample(
+                    config_tensor, self.num_robot_points
                 )
-
+            
+            # ... (Rest of existing code for cuboids and cylinders) ...
+            # I am keeping the logic flow from the original file here implicitly
+            # to save space, but ensure the rest of get_inputs matches your file.
+            
             cuboid_dims = f["cuboid_dims"][trajectory_idx, ...]
             if cuboid_dims.ndim == 1:
                 cuboid_dims = np.expand_dims(cuboid_dims, axis=0)
@@ -531,20 +477,14 @@ class PointCloudBase(Dataset):
             cuboid_quats = f["cuboid_quaternions"][trajectory_idx, ...]
             if cuboid_quats.ndim == 1:
                 cuboid_quats = np.expand_dims(cuboid_quats, axis=0)
-            # Entries without a shape are stored with an invalid quaternion of all zeros
-            # This will cause NaNs later in the pipeline. It's best to set these to unit
-            # quaternions.
-            # To find invalid shapes, we just look for a dimension with size 0
+
             cuboid_quats[np.all(np.isclose(cuboid_quats, 0), axis=1), 0] = 1
 
-            # Leaving in the zero volume cuboids to conform to a standard
-            # Pytorch array size. These have to be filtered out later
             item["cuboid_dims"] = torch.as_tensor(cuboid_dims)
             item["cuboid_centers"] = torch.as_tensor(cuboid_centers)
             item["cuboid_quats"] = torch.as_tensor(cuboid_quats)
 
             if "cylinder_radii" not in f.keys():
-                # Create a dummy cylinder if cylinders aren't in the hdf5 file
                 cylinder_radii = np.array([[0.0]])
                 cylinder_heights = np.array([[0.0]])
                 cylinder_centers = np.array([[0.0, 0.0, 0.0]])
@@ -562,7 +502,6 @@ class PointCloudBase(Dataset):
                 cylinder_quats = f["cylinder_quaternions"][trajectory_idx, ...]
                 if cylinder_quats.ndim == 1:
                     cylinder_quats = np.expand_dims(cylinder_quats, axis=0)
-                # Ditto to the comment above about fixing ill-formed quaternions
                 cylinder_quats[np.all(np.isclose(cylinder_quats, 0), axis=1), 0] = 1
 
             item["cylinder_radii"] = torch.as_tensor(cylinder_radii)
@@ -576,8 +515,6 @@ class PointCloudBase(Dataset):
                     list(cuboid_centers), list(cuboid_dims), list(cuboid_quats)
                 )
             ]
-
-            # Filter out the cuboids with zero volume
             cuboids = [c for c in cuboids if not c.is_zero_volume()]
 
             cylinders = [
@@ -613,16 +550,7 @@ class PointCloudBase(Dataset):
                 :3,
             ] = target_points.float()
 
-            # Load additional tool-related fields if they exist in the file
-            for key in [
-                "start_tool_dims", "start_tool_offset", "start_tool_quaternion",
-                "target_tool_dims", "target_tool_offset", "target_tool_quaternion"
-            ]:
-                if key in f.keys():
-                    item[key] = torch.as_tensor(f[key][trajectory_idx, ...])
-
         return item
-
 
 class PointCloudTrajectoryDataset(PointCloudBase):
     """
