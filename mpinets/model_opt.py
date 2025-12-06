@@ -79,8 +79,24 @@ class MotionPolicyNetwork(pl.LightningModule):
             nn.LeakyReLU(),
             nn.Linear(128, 64),
         )
+        
+        # --- NEW: Bounding Box Encoder ---
+        self.bbx_encoder = nn.Sequential(
+            nn.Linear(24, 32),
+            nn.LeakyReLU(),
+            nn.Linear(32, 64),
+            nn.LeakyReLU(),
+            nn.Linear(64, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, 64),
+        )
+
+        # --- UPDATED: Decoder Input Dimension ---
+        # 1024 (PC) + 64 (Config) + 64 (Target) + 64 (BBX) = 1216
         self.decoder = nn.Sequential(
-            nn.Linear(1024 + 64 + 64, 512),
+            nn.Linear(1024 + 64 + 64 + 64, 512),
             nn.LeakyReLU(),
             nn.Linear(512, 256),
             nn.LeakyReLU(),
@@ -94,13 +110,16 @@ class MotionPolicyNetwork(pl.LightningModule):
         return optimizer
 
     def forward(
-        self, xyz: torch.Tensor, q: torch.Tensor, target: torch.Tensor
+        self, xyz: torch.Tensor, q: torch.Tensor, target: torch.Tensor, bbx_feature: torch.Tensor
     ) -> torch.Tensor:
         # pc_encoding = self.point_cloud_encoder(xyz)
         pc_encoding = checkpoint.checkpoint(self.point_cloud_encoder, xyz)
         config_encoding = self.config_encoder(q)
         target_encoding = self.target_encoder(target)
-        x = torch.cat((pc_encoding, config_encoding, target_encoding), dim=1)
+        bbx_encoding = self.bbx_encoder(bbx_feature)
+        
+        # Concatenate all features including bbx
+        x = torch.cat((pc_encoding, config_encoding, target_encoding, bbx_encoding), dim=1)
         return self.decoder(x)
 
 
@@ -154,6 +173,9 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             batch["configuration"],
             batch["target_pose"],
         )
+        
+        # --- NEW: Extract BBX Feature ---
+        bbx_feature = batch.get("bbx_feature", torch.zeros((xyz.shape[0], 24), device=xyz.device))
 
         # Get composite tool parameters
         start_tool_dims = batch.get(
@@ -173,6 +195,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         if q.ndim == 1:
             xyz = xyz.unsqueeze(0)
             q = q.unsqueeze(0)
+            bbx_feature = bbx_feature.unsqueeze(0) # Unsqueeze bbx
             start_tool_dims = start_tool_dims.unsqueeze(0)
             start_tool_offset = start_tool_offset.unsqueeze(0)
             start_tool_quaternion = start_tool_quaternion.unsqueeze(0)
@@ -186,7 +209,9 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             trajectory = [q]
 
         for i in range(rollout_length):
-            q = torch.clamp(q + self(xyz, q, target_pose), min=-1, max=1)
+            # --- UPDATED: Pass bbx_feature to forward() ---
+            q = torch.clamp(q + self(xyz, q, target_pose, bbx_feature), min=-1, max=1)
+            
             q_unnorm = unnormalize_franka_joints(q)
             assert isinstance(q_unnorm, torch.Tensor)
             q_unnorm = q_unnorm.type_as(q)
