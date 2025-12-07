@@ -9,6 +9,7 @@ from pyquaternion import Quaternion
 import argparse
 import pickle
 import sys
+import itertools  # Added for BBX calculation
 
 from robofin.robots import FrankaRobot, FrankaGripper
 from robofin.bullet import BulletController, Bullet
@@ -31,6 +32,55 @@ NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
 MAX_ROLLOUT_LENGTH = 75
 GOAL_THRESHOLD = 0.01  # 1 cm threshold for goal reaching
+
+
+# --- Helper Function for BBX Calculation (Added) ---
+def compute_tool_bbx(dims, offsets, quats, num_primitives):
+    """
+    Computes the 8 corners of the Axis-Aligned Bounding Box (AABB)
+    for the entire composite tool in the tool frame.
+    """
+    if num_primitives == 0:
+        return torch.zeros(24).float()
+
+    all_corners = []
+
+    for i in range(num_primitives):
+        d = dims[i]
+        o = offsets[i]
+        q = quats[i]  # Expecting w, x, y, z
+
+        # 1. Generate 8 corners of the primitive centered at 0
+        dx, dy, dz = d[0] / 2.0, d[1] / 2.0, d[2] / 2.0
+        
+        local_corners = np.array(list(itertools.product(
+            [-dx, dx], [-dy, dy], [-dz, dz]
+        )))
+
+        # 2. Rotate corners
+        rot_mat = Quaternion(q).rotation_matrix
+        rotated_corners = local_corners @ rot_mat.T
+
+        # 3. Translate corners
+        global_corners = rotated_corners + o
+        all_corners.append(global_corners)
+
+    # Stack all points
+    all_points = np.vstack(all_corners)
+
+    # 4. Compute AABB
+    min_pt = np.min(all_points, axis=0)
+    max_pt = np.max(all_points, axis=0)
+
+    # 5. Generate the 8 corners of this AABB
+    min_x, min_y, min_z = min_pt
+    max_x, max_y, max_z = max_pt
+    
+    aabb_corners = np.array(list(itertools.product(
+        [min_x, max_x], [min_y, max_y], [min_z, max_z]
+    )))
+
+    return torch.as_tensor(aabb_corners).float().flatten()
 
 
 def create_point_cloud(robot_points, obstacle_points, target_points):
@@ -428,21 +478,6 @@ if __name__ == "__main__":
 
     # Precompute obstacle points once based on the chosen method
     if args.use_depth:
-        # Define a camera pose for rendering, this one is from `run_inference.py`
-        # for 'tabletop'. In a real application, this would be a real sensor pose.
-        # You may need to change this based on the environment type.
-
-        # # tabletop camera pose
-        # cam_pose = SE3(
-        #     xyz=[1.5031788593125708, -1.817341016921562, 1.278088299149147],
-        #     quaternion=[
-        #         0.8687241016192855,
-        #         0.4180885960330695,
-        #         0.11516106409944685,
-        #         0.23928704613569252,
-        #     ],
-        # ).inverse
-
         # cubby camera pose
         cam_pose = SE3(
             xyz=[0.08307640315968651, 1.986952324350807, 0.9996085854670145],
@@ -453,17 +488,6 @@ if __name__ == "__main__":
                 0.8276702686337273,
             ],
         ).inverse
-
-        # # dresser camera pose
-        # cam_pose = SE3(
-        #     xyz=[0.08307640315968651, 1.986952324350807, 0.9996085854670145],
-        #     quaternion=[
-        #         -0.10162310189063647,
-        #         -0.06726290364234049,
-        #         0.5478233048853433,
-        #         0.8276702686337273,
-        #     ],
-        # ).inverse
 
         all_obstacle_points = convert_to_depth(problem, cam_pose)
 
@@ -618,6 +642,24 @@ if __name__ == "__main__":
                 .to(q_norm.device)
             )
 
+            # --- NEW: Compute BBX Feature ---
+            num_prims = tool_params["tool_num_primitives"]
+            if num_prims > 0:
+                if tool_params["is_composite"]:
+                    dims = tool_params["tool_dims"]
+                    offsets = tool_params["tool_offsets"]
+                    quats = tool_params["tool_quats"]
+                else:
+                    dims = [tool_params["tool_dims"]]
+                    offsets = [tool_params["tool_offsets"]]
+                    quats = [tool_params["tool_quats"]]
+            else:
+                dims, offsets, quats = [], [], []
+
+            bbx_feat = compute_tool_bbx(dims, offsets, quats, num_prims)
+            bbx_feature_input = bbx_feat.unsqueeze(0).to(q_norm.device)
+            # --------------------------------
+
             trajectory = []
             trajectory.append(start_config.copy())
 
@@ -652,8 +694,9 @@ if __name__ == "__main__":
                     robot_points, obstacle_points_tensor, target_points
                 )
 
-                # Policy prediction
-                delta_q = model(xyz, q_norm, target_pose_input)
+                # Policy prediction -- UPDATED with bbx_feature_input
+                delta_q = model(xyz, q_norm, target_pose_input, bbx_feature_input)
+                
                 q_norm = torch.clamp(q_norm + delta_q, min=-1, max=1)
                 current_q = unnormalize_franka_joints(q_norm)
                 current_config = current_q.squeeze(0).detach().cpu().numpy()
