@@ -30,7 +30,7 @@ END_EFFECTOR_FRAME = "right_gripper"
 NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
-MAX_ROLLOUT_LENGTH = 150
+MAX_ROLLOUT_LENGTH = 69
 
 
 def get_tool_parameters(problem, device="cuda:0"):
