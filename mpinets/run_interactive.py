@@ -353,20 +353,6 @@ if __name__ == "__main__":
                 target_pose_mat, NUM_TARGET_POINTS
             ).squeeze(0)
 
-            # Construct the target pose input for the model
-            target_position = torch.as_tensor(
-                target_pose.matrix[:3, 3], dtype=torch.float32
-            )
-            # Use rotation matrix R9 as rotation representation
-            target_rot_mat = torch.as_tensor(
-                target_pose.matrix[:3, :3].flatten(), dtype=torch.float32
-            )
-            target_pose_input = (
-                torch.cat((target_position, target_rot_mat), dim=0)
-                .float()
-                .unsqueeze(0)
-                .to(q_norm.device)
-            )
 
             trajectory = []
             trajectory.append(start_config.copy())
@@ -386,7 +372,7 @@ if __name__ == "__main__":
                 )
 
                 # Policy prediction
-                delta_q = model(xyz, q_norm, target_pose_input)
+                delta_q = model(xyz, q_norm)
 
                 # The model inference is what we primarily want to time,
                 # but we'll include the necessary setup (sampling, point cloud creation)

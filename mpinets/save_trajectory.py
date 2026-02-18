@@ -133,24 +133,12 @@ def rollout_until_success(
     trajectory = [q]
     q_norm = normalize_franka_joints(q)
 
-    # Construct target pose input
-    target_position = torch.as_tensor(target.matrix[:3, 3], dtype=torch.float32)
-    target_rot_mat = torch.as_tensor(
-        target.matrix[:3, :3].flatten(), dtype=torch.float32
-    )
-    target_pose_input = (
-        torch.cat((target_position, target_rot_mat), dim=0)
-        .float()
-        .unsqueeze(0)
-        .to(q.device)
-    )
-
     def sampler(config):
         return fk_sampler.sample(config, NUM_ROBOT_POINTS)
 
     for i in range(MAX_ROLLOUT_LENGTH):
         q_norm = torch.clamp(
-            q_norm + mdl(point_cloud, q_norm, target_pose_input), min=-1, max=1
+            q_norm + mdl(point_cloud, q_norm), min=-1, max=1
         )
         qt = unnormalize_franka_joints(q_norm)
         trajectory.append(qt)

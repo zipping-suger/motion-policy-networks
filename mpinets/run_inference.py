@@ -143,19 +143,6 @@ def rollout_until_success(
     q_norm = normalize_franka_joints(q)
     assert isinstance(q_norm, torch.Tensor)
 
-    # Construct the target pose input for the model
-    target_position = torch.as_tensor(target.matrix[:3, 3], dtype=torch.float32)
-    # Use rotation matrix R9 as rotation representation
-    target_rot_mat = torch.as_tensor(
-        target.matrix[:3, :3].flatten(), dtype=torch.float32
-    )
-    target_pose_input = (
-        torch.cat((target_position, target_rot_mat), dim=0)
-        .float()
-        .unsqueeze(0)
-        .to(q.device)
-    )
-
     success = False
 
     def sampler(config):
@@ -163,7 +150,7 @@ def rollout_until_success(
 
     for i in range(MAX_ROLLOUT_LENGTH):
         q_norm = torch.clamp(
-            q_norm + mdl(point_cloud, q_norm, target_pose_input), min=-1, max=1
+            q_norm + mdl(point_cloud, q_norm), min=-1, max=1
         )
         qt = unnormalize_franka_joints(q_norm)
         assert isinstance(qt, torch.Tensor)

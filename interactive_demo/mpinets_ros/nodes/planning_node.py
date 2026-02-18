@@ -118,20 +118,6 @@ class Planner:
         )
         point_cloud = point_cloud.unsqueeze(0)
 
-        # Construct the target pose input for the model
-        target_position = torch.as_tensor(
-            target_pose.matrix[:3, 3], dtype=torch.float32
-        )
-        # Use rotation matrix R9 as rotation representation
-        target_rot_mat = torch.as_tensor(
-            target_pose.matrix[:3, :3].flatten(), dtype=torch.float32
-        )
-        target_pose_input = (
-            torch.cat((target_position, target_rot_mat), dim=0)
-            .unsqueeze(0)
-            .to(q.device)
-        )
-
         trajectory = [q]
         q_norm = normalize_franka_joints(q)
         success = False
@@ -142,7 +128,7 @@ class Planner:
 
         for _ in range(MAX_ROLLOUT_LENGTH):
             q_norm = torch.clamp(
-                q_norm + self.mdl(point_cloud, q_norm, target_pose_input), min=-0.95, max=0.95
+                q_norm + self.mdl(point_cloud, q_norm), min=-0.95, max=0.95
             )
             qt = unnormalize_franka_joints(q_norm).type_as(q)
             assert isinstance(qt, torch.Tensor)
