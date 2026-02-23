@@ -2,11 +2,11 @@ train_mode: "finetune"
 
 training_model_parameters:
     goal_loss_weight: 1
-    collision_loss_weight: 10
+    collision_loss_weight: 5
 
 data_module_parameters:
-  data_dir: /data/cubby_2k
-  trajectory_key: 'global_solutions'
+  data_dir: /data/mpinets_hybrid_training_data_small
+  trajectory_key: 'hybrid_solutions'
   num_obstacle_points: 4096
   num_target_points: 128
   random_scale: 0
@@ -14,12 +14,12 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: /workspace/pretrain_mpinets_hybrid_training_data/m67zonxm/last.ckpt
+model_path: /workspace/mpinets_hybrid_expert.ckpt
 checkpoint_interval: 10
-validation_interval: 10
-gpus: 1 # If > 1, will use DDP for training.
-batch_size: 48
-save_checkpoint_dir: /workspace/finetune_cubby_2k_with_pre_mpinet
+validation_interval: 1000
+gpus: 8 # If > 1, will use DDP for training.
+batch_size: 32
+save_checkpoint_dir: /workspace/finetune_mpinets_hybrid_training_data_small_hybrid_finetuned_on_small
 max_epochs: 50
-experiment_name: finetune_cubby_2k_with_pre_mpinet
-description: "cubby 2k"
+experiment_name: finetune_mpinets_hybrid_training_data_small
+description: "Finetuning MPINets on the hybrid training data."
