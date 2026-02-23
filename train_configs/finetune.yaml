@@ -17,7 +17,7 @@ shared_parameters:
 model_path: /workspace/mpinets_hybrid_training_data_small_pretrain/ysk4bxj9/last.ckpt
 checkpoint_interval: 10
 validation_interval: 500
-gpus: 1 # If > 1, will use DDP for training.
+gpus: 6 # If > 1, will use DDP for training.
 batch_size: 32
 save_checkpoint_dir: /workspace/finetune_mpinets_hybrid_training_data_small
 max_epochs: 50
