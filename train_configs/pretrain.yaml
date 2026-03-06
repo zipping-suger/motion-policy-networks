@@ -5,7 +5,7 @@ training_model_parameters:
     collision_loss_weight: 5
 
 data_module_parameters:
-  data_dir: /data/cabinet_60k
+  data_dir: /data/cabinet_100k
   trajectory_key: 'global_solutions' # Could also use 'global_solutions' for the global expert
   num_obstacle_points: 4096
   num_target_points: 128
@@ -16,8 +16,8 @@ shared_parameters:
 model_path: /workspace/mpinets_finetune_mpinets_hybrid_training_data_small_hybrid_finetuned_on_small/sp2hrle1/epoch=14-step=17040.ckpt
 checkpoint_interval: 10
 validation_interval: 1800
-gpus: 2 # If > 1, will use DDP for training.
+gpus: 4 # If > 1, will use DDP for training.
 batch_size: 32
-save_checkpoint_dir: /workspace/bc_cabinet_60k
-experiment_name: bc_cabinet_60k
-description: "finetune on cabinet 60k expert data with pre-trained mpinets"
+save_checkpoint_dir: /workspace/bc_cabinet_100k
+experiment_name: bc_cabinet_100k
+description: "finetune on cabinet 100k expert data with pre-trained mpinets"
