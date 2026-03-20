@@ -62,11 +62,17 @@ class Evaluator:
     This class can be used to evaluate a whole set of environments and data
     """
 
-    def __init__(self, fabric_urdf_path: str = None, gui: bool = False):
+    def __init__(
+        self,
+        fabric_urdf_path: str = None,
+        gui: bool = False,
+        show_failure_info: bool = False,
+    ):
         """
         Initializes the evaluator class
 
         :param gui bool: Whether to visualize trajectories (and showing visually whether they are failures)
+        :param show_failure_info bool: Whether to print metrics and info for unsuccessful problems
         """
         self.sim = Bullet(gui=False)
         self.selfcc = FrankaSelfCollisionChecker()
@@ -84,6 +90,7 @@ class Evaluator:
         self.groups = {}
         self.current_group = None
         self.current_group_key = None
+        self.show_failure_info = show_failure_info
         if fabric_urdf_path is None:
             self.fabric_urdf_path = "/isaac-sim/exts/omni.isaac.motion_generation/motion_policy_configs/franka/lula_franka_gen.urdf"
         else:
@@ -433,6 +440,33 @@ class Evaluator:
             )
         return eff_position_path_length, eff_orientation_path_length
 
+    @staticmethod
+    def calculate_joint_path_length(trajectory: Trajectory) -> float:
+        """
+        Calculate the joint path length as sum of squared displacements between consecutive configurations
+        following the TrajOpt formulation.
+
+        :param trajectory Trajectory: The trajectory (sequence of 7DOF joint configurations)
+        :rtype float: Joint path length value
+        """
+        configs = np.asarray(trajectory)
+        return np.sum(np.square(np.diff(configs, axis=0)))
+
+    @staticmethod
+    def calculate_true_joint_path_length(trajectory: Trajectory) -> float:
+        """
+        Calculates the L2 Euclidean path length in C-space.
+        This is safe to use when comparing trajectories with different T,
+        as it measures the true geometric distance traveled regardless of discretization.
+
+        :param trajectory Trajectory: The trajectory (sequence of 7DOF joint configurations)
+        :rtype float: True geometric joint path length value
+        """
+        configs = np.asarray(trajectory)
+        diffs = np.diff(configs, axis=0)
+        step_lengths = np.linalg.norm(diffs, axis=1)
+        return float(np.sum(step_lengths))
+
     def evaluate_trajectory(
         self,
         trajectory: Trajectory,
@@ -503,6 +537,12 @@ class Evaluator:
         add_metric("eff_position_path_length", eff_position_path_length)
         add_metric("eff_orientation_path_length", eff_orientation_path_length)
 
+        joint_path_length = self.calculate_joint_path_length(trajectory)
+        add_metric("joint_path_length", joint_path_length)
+
+        true_joint_path_length = self.calculate_true_joint_path_length(trajectory)
+        add_metric("true_joint_path_length", true_joint_path_length)
+
         # Sometimes the target is inside a negative volume. This is obviously a bad negative volume
         corrected_negative_volumes = [
             v for v in target_negative_volumes if v.sdf(target._xyz) > 0
@@ -525,13 +565,19 @@ class Evaluator:
         def msg(metric, is_error):
             return colored(metric, "red") if is_error else colored(metric, "green")
 
-        if self.gui_sim is not None and len(collision_depths) > 0:
+        if (
+            self.gui_sim is not None
+            and (success or self.show_failure_info)
+            and len(collision_depths) > 0
+        ):
             print("Position Error:", msg(position_error, position_error > 1))
             print("Orientation Error:", msg(orientation_error, orientation_error > 15))
             print("Config SPARC:", msg(config_smoothness, config_smoothness > -1.6))
             print("End Eff SPARC:", msg(eff_smoothness, eff_smoothness > -1.6))
             print(f"End Eff Position Path Length: {eff_position_path_length}")
             print(f"End Eff Orientation Path Length: {eff_orientation_path_length}")
+            print(f"Joint Path Length: {joint_path_length}")
+            print(f"True Joint Path Length: {true_joint_path_length}")
             print("Physical violation:", msg(physical_violation, physical_violation))
             print(
                 "Collisions:",
@@ -589,6 +635,8 @@ class Evaluator:
         all_eff_orientation_path_lengths = np.asarray(
             group["eff_orientation_path_length"]
         )
+        all_joint_path_lengths = np.asarray(group["joint_path_length"])
+        all_true_joint_path_lengths = np.asarray(group["true_joint_path_length"])
         all_times = np.asarray(group["time"])
 
         is_smooth = percent_true(
@@ -606,15 +654,21 @@ class Evaluator:
         if "skips" in group:
             # Needed when there are skips
             successes = np.asarray(group["success"])
-            unskipped_successes = successes[~np.isinf(all_times)]
+            unskipped_mask = ~np.isinf(all_times)
+            unskipped_successes = successes[unskipped_mask]
             skips = group["skips"]
         else:
+            unskipped_mask = np.ones(len(all_times), dtype=bool)
             unskipped_successes = group["success"]
 
         success_position_path_lengths = all_eff_position_path_lengths[
             unskipped_successes
         ]
         success_orientation_path_lengths = all_eff_orientation_path_lengths[
+            unskipped_successes
+        ]
+        success_joint_path_lengths = all_joint_path_lengths[unskipped_successes]
+        success_true_joint_path_lengths = all_true_joint_path_lengths[
             unskipped_successes
         ]
         eff_position_path_length = (
@@ -624,6 +678,38 @@ class Evaluator:
         eff_orientation_path_length = (
             np.mean(success_orientation_path_lengths),
             np.std(success_orientation_path_lengths),
+        )
+        joint_path_length = (
+            np.mean(success_joint_path_lengths),
+            np.std(success_joint_path_lengths),
+        )
+        true_joint_path_length = (
+            np.mean(success_true_joint_path_lengths),
+            np.std(success_true_joint_path_lengths),
+        )
+
+        # Calculate overall path lengths including all non-skipped runs
+        all_position_path_lengths = all_eff_position_path_lengths[unskipped_mask]
+        all_orientation_path_lengths = all_eff_orientation_path_lengths[unskipped_mask]
+        all_joint_path_lengths_all_runs = all_joint_path_lengths[unskipped_mask]
+        eff_position_path_length_all_runs = (
+            np.mean(all_position_path_lengths),
+            np.std(all_position_path_lengths),
+        )
+        eff_orientation_path_length_all_runs = (
+            np.mean(all_orientation_path_lengths),
+            np.std(all_orientation_path_lengths),
+        )
+        joint_path_length_all_runs = (
+            np.mean(all_joint_path_lengths_all_runs),
+            np.std(all_joint_path_lengths_all_runs),
+        )
+        all_true_joint_path_lengths_all_runs = all_true_joint_path_lengths[
+            unskipped_mask
+        ]
+        true_joint_path_length_all_runs = (
+            np.mean(all_true_joint_path_lengths_all_runs),
+            np.std(all_true_joint_path_lengths_all_runs),
         )
         success_times = all_times[group["success"]]
         time = (
@@ -669,14 +755,21 @@ class Evaluator:
             "average eff sparc": eff_smoothness,
             "eff position path length": eff_position_path_length,
             "eff orientation path length": eff_orientation_path_length,
+            "joint path length": joint_path_length,
+            "true joint path length": true_joint_path_length,
+            "eff position path length (all runs)": eff_position_path_length_all_runs,
+            "eff orientation path length (all runs)": eff_orientation_path_length_all_runs,
+            "joint path length (all runs)": joint_path_length_all_runs,
+            "true joint path length (all runs)": true_joint_path_length_all_runs,
         }
 
     @staticmethod
-    def print_metrics(group: Dict[str, Any]):
+    def print_metrics(group: Dict[str, Any], show_failure_info: bool = False):
         """
         Prints the metrics in an easy to read format
 
         :param group Dict[str, float]: The group of results
+        :param show_failure_info bool: Whether to print metrics for unsuccessful problems
         """
         metrics = Evaluator.metrics(group)
         print(f"Total problems: {metrics['total']}")
@@ -685,19 +778,24 @@ class Evaluator:
         print(f"% Within 0.5cm: {metrics['0.5 cm']:4.2f}")
         print(f"% Within 1cm: {metrics['1 cm']:4.2f}")
         print(f"% Within 5cm: {metrics['5 cm']:4.2f}")
-        print(f"% Within 5deg: {metrics['5 deg']:4.2f}")  
+        print(f"% Within 5deg: {metrics['5 deg']:4.2f}")
         print(f"% Within 15deg: {metrics['15 deg']:4.2f}")
         print(f"% Within 30deg: {metrics['30 deg']:4.2f}")
         print(f"% Within 15deg of 180: {metrics['165 deg']:4.2f}")
-        print(f"Average Position Error (cm): {metrics['average position error']:4.2f}")
-        print(f"Average Orientation Error (deg): {metrics['average orientation error']:4.2f}")
-        print(f"% With Environment Collision: {metrics['env collision']:4.2f}")
-        print(f"% With Self Collision: {metrics['self collision']:4.2f}")
-        print(f"% With Joint Limit Violations: {metrics['joint violation']:4.2f}")
-        print(f"% With Self Collision: {metrics['self collision']:4.2f}")
-        print(f"Average Collision Depth (cm): {metrics['average collision depth']}")
-        print(f"Median Collision Depth (cm): {metrics['median collision depth']}")
-        print(f"% With Physical Violations: {metrics['physical violations']:4.2f}")
+        if show_failure_info:
+            print(
+                f"Average Position Error (cm): {metrics['average position error']:4.2f}"
+            )
+            print(
+                f"Average Orientation Error (deg): {metrics['average orientation error']:4.2f}"
+            )
+            print(f"% With Environment Collision: {metrics['env collision']:4.2f}")
+            print(f"% With Self Collision: {metrics['self collision']:4.2f}")
+            print(f"% With Joint Limit Violations: {metrics['joint violation']:4.2f}")
+            print(f"% With Self Collision: {metrics['self collision']:4.2f}")
+            print(f"Average Collision Depth (cm): {metrics['average collision depth']}")
+            print(f"Median Collision Depth (cm): {metrics['median collision depth']}")
+            print(f"% With Physical Violations: {metrics['physical violations']:4.2f}")
         print(f"Average Config SPARC: {metrics['average config sparc']:4.2f}")
         print(f"Average End Eff SPARC: {metrics['average eff sparc']:4.2f}")
         print(f"% Smooth: {metrics['is smooth']:4.2f}")
@@ -711,6 +809,37 @@ class Evaluator:
             f" {metrics['eff orientation path length'][0]:4.2f}"
             f" ± {metrics['eff orientation path length'][1]:4.2f}"
         )
+        print(
+            "Average Joint Path Length (TrajOpt-style):"
+            f" {metrics['joint path length'][0]:4.2f}"
+            f" ± {metrics['joint path length'][1]:4.2f}"
+        )
+        print(
+            "Average True Joint Path Length (Euclidean):"
+            f" {metrics['true joint path length'][0]:4.2f}"
+            f" ± {metrics['true joint path length'][1]:4.2f}"
+        )
+        if show_failure_info:
+            print(
+                "Average End Eff Position Path Length (all runs):"
+                f" {metrics['eff position path length (all runs)'][0]:4.2f}"
+                f" ± {metrics['eff position path length (all runs)'][1]:4.2f}"
+            )
+            print(
+                "Average End Eff Orientation Path Length (all runs):"
+                f" {metrics['eff orientation path length (all runs)'][0]:4.2f}"
+                f" ± {metrics['eff orientation path length (all runs)'][1]:4.2f}"
+            )
+            print(
+                "Average Joint Path Length (TrajOpt-style, all runs):"
+                f" {metrics['joint path length (all runs)'][0]:4.2f}"
+                f" ± {metrics['joint path length (all runs)'][1]:4.2f}"
+            )
+            print(
+                "Average True Joint Path Length (Euclidean, all runs):"
+                f" {metrics['true joint path length (all runs)'][0]:4.2f}"
+                f" ± {metrics['true joint path length (all runs)'][1]:4.2f}"
+            )
         print(f"Average Time: {metrics['time'][0]:4.2f} ± {metrics['time'][1]:4.2f}")
         print(
             "Average Time Per Step (Not Always Valuable):"
@@ -756,7 +885,7 @@ class Evaluator:
         if key is not None:
             self.current_group = self.groups[key]
             self.current_group_key = key
-        return self.print_metrics(self.current_group)
+        return self.print_metrics(self.current_group, self.show_failure_info)
 
     def print_overall_metrics(self):
         """
@@ -773,4 +902,4 @@ class Evaluator:
             for group in self.groups.values():
                 metrics.extend(group.get(key, []))
             supergroup[key] = metrics
-        return self.print_metrics(supergroup)
+        return self.print_metrics(supergroup, self.show_failure_info)
