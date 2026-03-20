@@ -14,12 +14,12 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: /workspace/mpinets_hybrid_expert.ckpt
+model_path: /workspace/pretrain_mpinets_hybrid_training_data/m67zonxm/last.ckpt
 checkpoint_interval: 10
 validation_interval: 1000
 gpus: 8 # If > 1, will use DDP for training.
 batch_size: 32
-save_checkpoint_dir: /workspace/finetune_mpinets_hybrid_training_data_small_hybrid_finetuned_on_small
+save_checkpoint_dir: /workspace/finetune_eff_path_length
 max_epochs: 50
-experiment_name: finetune_mpinets_hybrid_training_data_small
-description: "Finetuning MPINets on the hybrid training data."
+experiment_name: "finetune_eff_path_length"
+description: "Finetuning on the hybrid training data with eff path length loss."

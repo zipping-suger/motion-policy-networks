@@ -18,21 +18,32 @@ ROLLOUT_LENGTH = 69  # The trajectory length will be ROLLOUT_LENGTH + 1
 
 # Self-collision pairs for Franka Emika Panda robot
 FRANKA_SELF_COLLISION_PAIRS = [
-    ('panda_link0', 'panda_link2'), ('panda_link0', 'panda_link3'),
-    ('panda_link0', 'panda_link4'), ('panda_link0', 'panda_link5'),
-    ('panda_link0', 'panda_link6'), ('panda_link0', 'panda_link7'),
-    ('panda_link0', 'panda_hand'),
-    ('panda_link1', 'panda_link3'), ('panda_link1', 'panda_link4'),
-    ('panda_link1', 'panda_link5'), ('panda_link1', 'panda_link6'),
-    ('panda_link1', 'panda_link7'), ('panda_link1', 'panda_hand'),
-    ('panda_link2', 'panda_link4'), ('panda_link2', 'panda_link5'),
-    ('panda_link2', 'panda_link6'), ('panda_link2', 'panda_link7'),
-    ('panda_link2', 'panda_hand'),
-    ('panda_link3', 'panda_link5'), ('panda_link3', 'panda_link6'),
-    ('panda_link3', 'panda_link7'), ('panda_link3', 'panda_hand'),
-    ('panda_link4', 'panda_link6'), ('panda_link4', 'panda_link7'),
-    ('panda_link4', 'panda_hand'),
-    ('panda_link5', 'panda_hand'),
+    ("panda_link0", "panda_link2"),
+    ("panda_link0", "panda_link3"),
+    ("panda_link0", "panda_link4"),
+    ("panda_link0", "panda_link5"),
+    ("panda_link0", "panda_link6"),
+    ("panda_link0", "panda_link7"),
+    ("panda_link0", "panda_hand"),
+    ("panda_link1", "panda_link3"),
+    ("panda_link1", "panda_link4"),
+    ("panda_link1", "panda_link5"),
+    ("panda_link1", "panda_link6"),
+    ("panda_link1", "panda_link7"),
+    ("panda_link1", "panda_hand"),
+    ("panda_link2", "panda_link4"),
+    ("panda_link2", "panda_link5"),
+    ("panda_link2", "panda_link6"),
+    ("panda_link2", "panda_link7"),
+    ("panda_link2", "panda_hand"),
+    ("panda_link3", "panda_link5"),
+    ("panda_link3", "panda_link6"),
+    ("panda_link3", "panda_link7"),
+    ("panda_link3", "panda_hand"),
+    ("panda_link4", "panda_link6"),
+    ("panda_link4", "panda_link7"),
+    ("panda_link4", "panda_hand"),
+    ("panda_link5", "panda_hand"),
     # Note: 'panda_hand' in the robofin URDF includes the gripper fingers.
 ]
 
@@ -103,8 +114,12 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         collision_loss_weight: float,
         self_collision_loss_weight: float = 2.0,
         use_self_collision: bool = False,
-        smoothness_weight: float = 0.1, 
+        smoothness_weight: float = 0.1,
         use_smoothness_loss: bool = True,
+        eff_pos_path_weight: float = 0.1,
+        use_eff_pos_path_loss: bool = True,
+        eff_orient_path_weight: float = 0.1,
+        use_eff_orient_path_loss: bool = False,
         fix_point_cloud_encoder: bool = False,
     ):
         super().__init__()
@@ -117,6 +132,10 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         self.use_self_collision = use_self_collision
         self.smoothness_weight = smoothness_weight
         self.use_smoothness_loss = use_smoothness_loss
+        self.eff_pos_path_weight = eff_pos_path_weight
+        self.use_eff_pos_path_loss = use_eff_pos_path_loss
+        self.eff_orient_path_weight = eff_orient_path_weight
+        self.use_eff_orient_path_loss = use_eff_orient_path_loss
         self.fix_point_cloud_encoder = fix_point_cloud_encoder
         self.validation_step_outputs = []
 
@@ -175,7 +194,9 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
         return trajectory
 
-    def eval_rollout(self, rollout: List[torch.Tensor], batch: torch.Tensor) -> Tuple[
+    def eval_rollout(
+        self, rollout: List[torch.Tensor], batch: torch.Tensor
+    ) -> Tuple[
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
@@ -251,7 +272,9 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
 
                         dists = torch.cdist(pc_a, pc_b)
                         min_dists = torch.min(dists.view(dists.shape[0], -1), dim=1)[0]
-                        self_colli_loss = torch.sum(torch.clamp(0.03 - min_dists, min=0))
+                        self_colli_loss = torch.sum(
+                            torch.clamp(0.03 - min_dists, min=0)
+                        )
                         total_self_colli_loss += self_colli_loss
 
         # ACTION SMOOTHNESS LOSS - Core addition
@@ -277,19 +300,55 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             # Normalize by number of transitions
             smoothness_loss = smoothness_loss / (len(rollout) - 1)
 
-        # Calculate total loss with smoothness term
+        # END EFFECTOR PATH LENGTH LOSSES
+        eff_pos_path_loss = 0.0
+        eff_orient_path_loss = 0.0
+        if (self.use_eff_pos_path_loss or self.use_eff_orient_path_loss) and len(
+            rollout
+        ) > 1:
+            eff_poses = [self.fk_sampler.end_effector_pose(q) for q in rollout]
+
+            # Position path length loss
+            if self.use_eff_pos_path_loss:
+                eff_positions = torch.stack(
+                    [pose[:, :3, -1] for pose in eff_poses], dim=1
+                )
+                pos_diffs = torch.linalg.norm(torch.diff(eff_positions, dim=1), dim=-1)
+                eff_pos_path_loss = torch.mean(torch.sum(pos_diffs, dim=1))
+
+            # Orientation path length loss
+            if self.use_eff_orient_path_loss:
+                for i in range(len(eff_poses) - 1):
+                    R1 = eff_poses[i][:, :3, :3]
+                    R2 = eff_poses[i + 1][:, :3, :3]
+                    trace = torch.einsum("bii->b", torch.bmm(R1.transpose(1, 2), R2))
+                    angle_diff = torch.acos(
+                        torch.clamp((trace - 1) / 2, min=-1 + 1e-6, max=1 - 1e-6)
+                    )
+                    eff_orient_path_loss += torch.mean(
+                        torch.abs(torch.rad2deg(angle_diff))
+                    )
+
+                # Normalize by number of transitions
+                eff_orient_path_loss = eff_orient_path_loss / (len(rollout) - 1)
+
+        # Calculate total loss with smoothness and path length terms
         if self.use_self_collision:
             train_loss = (
                 self.goal_loss_weight * goal_loss
                 + self.collision_loss_weight * total_colli_loss
                 + self.self_collision_loss_weight * total_self_colli_loss
                 + self.smoothness_weight * smoothness_loss
+                + self.eff_pos_path_weight * eff_pos_path_loss
+                + self.eff_orient_path_weight * eff_orient_path_loss
             )
         else:
             train_loss = (
                 self.goal_loss_weight * goal_loss
                 + self.collision_loss_weight * total_colli_loss
                 + self.smoothness_weight * smoothness_loss
+                + self.eff_pos_path_weight * eff_pos_path_loss
+                + self.eff_orient_path_weight * eff_orient_path_loss
             )
 
         return (
@@ -300,9 +359,13 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             torch.mean(position_loss),
             torch.mean(rotation_loss),
             smoothness_loss,  # Return for logging
+            eff_pos_path_loss,  # Return for logging
+            eff_orient_path_loss,  # Return for logging
         )
 
-    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
+    def training_step(
+        self, batch: Dict[str, torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
         """
         Updated to log smoothness loss
         """
@@ -314,7 +377,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             )
         rollout = self.rollout(batch, ROLLOUT_LENGTH, self.sample)
 
-        # Unpack all losses including smoothness_loss
+        # Unpack all losses including smoothness_loss and path length losses
         (
             train_loss,
             goal_loss,
@@ -323,6 +386,8 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
             position_loss,
             rotation_loss,
             smoothness_loss,
+            eff_pos_path_loss,
+            eff_orient_path_loss,
         ) = self.eval_rollout(rollout, batch)
 
         # Log all losses
@@ -335,6 +400,10 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         self.log("rotation_loss", rotation_loss)
         if self.use_smoothness_loss:
             self.log("smoothness_loss", smoothness_loss)
+        if self.use_eff_pos_path_loss:
+            self.log("eff_pos_path_loss", eff_pos_path_loss)
+        if self.use_eff_orient_path_loss:
+            self.log("eff_orient_path_loss", eff_orient_path_loss)
 
         return train_loss
 
