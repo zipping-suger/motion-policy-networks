@@ -66,7 +66,7 @@ class Evaluator:
         self,
         fabric_urdf_path: str = None,
         gui: bool = False,
-        show_failure_info: bool = False,
+        show_failure_info: bool = True,
     ):
         """
         Initializes the evaluator class

@@ -116,7 +116,7 @@ class TrainingPolicyNetOpt(MotionPolicyNetwork):
         use_self_collision: bool = False,
         smoothness_weight: float = 0.1,
         use_smoothness_loss: bool = True,
-        eff_pos_path_weight: float = 0.02,
+        eff_pos_path_weight: float = 0.005,
         use_eff_pos_path_loss: bool = True,
         eff_orient_path_weight: float = 0.1,
         use_eff_orient_path_loss: bool = False,
