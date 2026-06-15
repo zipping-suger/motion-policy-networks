@@ -2,10 +2,10 @@ train_mode: "pretrain"
 
 training_model_parameters:
     point_match_loss_weight: 1
-    collision_loss_weight: 5
+    collision_loss_weight: 10
 
 data_module_parameters:
-  data_dir: /data/cabinet_200k
+  data_dir: /data/mpinets_hybrid_training_data_10k
   trajectory_key: 'global_solutions' # Could also use 'global_solutions' for the global expert
   num_obstacle_points: 4096
   num_target_points: 128
@@ -13,12 +13,12 @@ data_module_parameters:
 shared_parameters:
     num_robot_points: 2048
 
-model_path: /workspace/mpinets_finetune_mpinets_hybrid_training_data_small_hybrid_finetuned_on_small/sp2hrle1/epoch=14-step=17040.ckpt
+model_path: null
 checkpoint_interval: 10
 validation_interval: 3200
-gpus: 6 # If > 1, will use DDP for training.
+gpus: 1 # If > 1, will use DDP for training.
 batch_size: 32
-save_checkpoint_dir: /workspace/bc_cabinet_200k
+save_checkpoint_dir: /workspace/pretrain_10k_checkpoints
 max_epochs: 100
-experiment_name: bc_cabinet_200k
-description: "finetune on cabinet 200k expert data with pre-trained mpinets"
+experiment_name: "pretrain_10k_experiment"
+description: "pretrain with 10k" 

@@ -13,7 +13,7 @@ CHECKPOINT_DIR="/cluster/home/yixili/motion-policy-networks/checkpoints"
 
 echo "Starting Singularity container..."
 
-singularity exec \
+apptainer exec \
   --nv \
   --cleanenv \
   --writable-tmpfs \
