@@ -5,7 +5,7 @@ training_model_parameters:
     collision_loss_weight: 10
 
 data_module_parameters:
-  data_dir: /data/mpinets_hybrid_training_data_10k
+  data_dir: /data/mpinets_hybrid_training_data_50k
   trajectory_key: 'hybrid_solutions' # Could also use 'global_solutions' for the global expert
   num_obstacle_points: 4096
   num_target_points: 128
@@ -18,7 +18,7 @@ checkpoint_interval: 10
 validation_interval: 3200
 gpus: 1 # If > 1, will use DDP for training.
 batch_size: 32
-save_checkpoint_dir: /workspace/pretrain_10k_checkpoints
+save_checkpoint_dir: /workspace/pretrain_50k_checkpoints
 max_epochs: 100
-experiment_name: "pretrain_10k_experiment"
-description: "pretrain with 10k" 
+experiment_name: "pretrain_50k_experiment"
+description: "pretrain with 50k" 
