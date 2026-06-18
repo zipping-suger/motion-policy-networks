@@ -256,6 +256,84 @@ def convert_primitive_problems_to_depth(problems: ProblemSet):
                     pbar.update(1)
 
 
+def print_failure_composition(evaluator: Evaluator):
+    """
+    Print mutually exclusive failure composition from evaluator's stored metrics.
+    Collision is checked first (accuracy not considered for collision failures).
+    """
+    all_success = []
+    all_pos_err = []
+    all_orient_err = []
+    all_collision = []
+    all_self_collision = []
+    all_joint_limit = []
+    all_physical = []
+    all_skips = []
+
+    for key, group in evaluator.groups.items():
+        all_success.extend(group.get("success", []))
+        all_pos_err.extend(group.get("position_error", []))
+        all_orient_err.extend(group.get("orientation_error", []))
+        all_collision.extend(group.get("collision", []))
+        all_self_collision.extend(group.get("self_collision", []))
+        all_joint_limit.extend(group.get("joint_limit_violation", []))
+        all_physical.extend(group.get("physical_violations", []))
+        all_skips.extend(group.get("skips", []))
+
+    n_total = len(all_success)
+    n_skips = len(all_skips)
+    n_evaluated = len(all_pos_err)
+    n_success = int(np.sum(all_success))
+
+    if n_total == 0 or n_evaluated == 0:
+        return
+
+    pos_err = np.array(all_pos_err)
+    orient_err = np.array(all_orient_err)
+    env_coll = np.array(all_collision, dtype=bool)
+    self_coll = np.array(all_self_collision, dtype=bool)
+    jl_viol = np.array(all_joint_limit, dtype=bool)
+    any_physical = np.array(all_physical, dtype=bool)
+
+    pos_fail = pos_err >= 1.0
+    orient_fail = orient_err >= 15.0
+    no_collision = ~any_physical
+
+    fail_env_coll = env_coll
+    fail_self_coll_only = self_coll & ~env_coll
+    fail_jl_only = jl_viol & ~env_coll & ~self_coll
+    fail_pos_only = no_collision & pos_fail & ~orient_fail
+    fail_orient_only = no_collision & ~pos_fail & orient_fail
+    fail_both_acc = no_collision & pos_fail & orient_fail
+
+    n_env_coll = int(fail_env_coll.sum())
+    n_self_coll_only = int(fail_self_coll_only.sum())
+    n_jl_only = int(fail_jl_only.sum())
+    n_pos_only = int(fail_pos_only.sum())
+    n_orient_only = int(fail_orient_only.sum())
+    n_both_acc = int(fail_both_acc.sum())
+
+    tpct = lambda n: f"{100*n/max(n_total,1):.1f}%"
+
+    print("\n" + "=" * 80)
+    print("FAILURE COMPOSITION (mutually exclusive, collision checked first)")
+    print("=" * 80)
+    print(f"{'Category':<52s}  {'Count':>5s}  {'% Total':>7s}")
+    print("-" * 80)
+    print(f"  {'Success':<50s}  {n_success:5d}  {tpct(n_success):>7s}")
+    print(f"  {'Hard skip (no trajectory)':<50s}  {n_skips:5d}  {tpct(n_skips):>7s}")
+    print(f"  {'Env collision (accuracy not considered)':<50s}  {n_env_coll:5d}  {tpct(n_env_coll):>7s}")
+    print(f"  {'Self collision only (accuracy not considered)':<50s}  {n_self_coll_only:5d}  {tpct(n_self_coll_only):>7s}")
+    print(f"  {'Joint limit violation only':<50s}  {n_jl_only:5d}  {tpct(n_jl_only):>7s}")
+    print(f"  {'Position error only (>=1cm, <15deg)':<50s}  {n_pos_only:5d}  {tpct(n_pos_only):>7s}")
+    print(f"  {'Orientation error only (<1cm, >=15deg)':<50s}  {n_orient_only:5d}  {tpct(n_orient_only):>7s}")
+    print(f"  {'Both pos (>=1cm) & orient (>=15deg) error':<50s}  {n_both_acc:5d}  {tpct(n_both_acc):>7s}")
+    print("-" * 80)
+    checksum = n_success + n_skips + n_env_coll + n_self_coll_only + n_jl_only + n_pos_only + n_orient_only + n_both_acc
+    print(f"  {'Checksum':<50s}  {checksum:5d}  {tpct(checksum):>7s}")
+    print("=" * 80)
+
+
 @torch.no_grad()
 def calculate_metrics(
     mdl_path: str, problems: List[PlanningProblem], verbose: bool = False
@@ -517,6 +595,7 @@ def calculate_metrics(
 
     print("Overall Metrics")
     eval.print_overall_metrics()
+    print_failure_composition(eval)
 
 
 @torch.no_grad()
@@ -834,6 +913,7 @@ def visualize_results(mdl_path: str, problems: ProblemSet, verbose: bool = False
 
     print("Overall Metrics")
     eval.print_overall_metrics()
+    print_failure_composition(eval)
 
 
 if __name__ == "__main__":
