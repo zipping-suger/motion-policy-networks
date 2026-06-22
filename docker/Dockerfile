@@ -182,7 +182,7 @@ RUN ln -fs /usr/share/zoneinfo/America/Los_Angeles /etc/localtime \
   && rm -rf /var/lib/apt \
   && echo "source /opt/ros/melodic/setup.bash" >> ~/.bashrc \
   && rosdep init && rosdep update \
-  && python3 -m pip install rospkg netifaces
+  && python3 -m pip install rospkg netifaces ruckig
 
 ENV ROS_HOSTNAME=localhost
 ENV ROS_MASTER_URI=http://localhost:11311

@@ -13,7 +13,7 @@ from std_msgs.msg import Header, Bool
 import time
 import trimesh.transformations as tra
 from functools import partial
-from geometrout.transform import SE3
+from geometrout.transform import SE3, SO3
 import sensor_msgs.point_cloud2 as pc2
 import os
 import threading
@@ -33,7 +33,6 @@ NUM_ROBOT_POINTS = 2048
 NUM_OBSTACLE_POINTS = 4096
 NUM_TARGET_POINTS = 128
 
-RUCKIG_AVAILABLE = False
 # Global parameter: Set to True for self-feedback (simulation), False for real robot feedback
 USE_SELF_FEEDBACK = rospy.get_param("~use_self_feedback", False)  # Default is False
 
@@ -160,7 +159,7 @@ class ReactiveController:
         regular_error = np.abs(np.degrees((quat1 * quat2.conjugate).radians))
         
         # Error with 180° z-axis flip
-        flip_z_quat = SO3.from_rotvec([0, 0, np.pi])._quat
+        flip_z_quat = SO3.from_rpy(0, 0, np.pi)._quat
         flipped_error = np.abs(np.degrees((quat1 * (quat2 * flip_z_quat).conjugate).radians))
         
         # Use minimum orientation error
@@ -226,6 +225,9 @@ class ReactiveControllerNode:
         # Waypoint buffer for Ruckig smoothing
         self.waypoint_buffer = []
         self.max_waypoints = RUCKIG_LOOKAHEAD
+        # Whether the Ruckig OTG has been seeded for the current control session.
+        # Reset on each new target so it re-seeds from the live robot state.
+        self.ruckig_started = False
 
         # Get the point cloud path parameter
         point_cloud_path = rospy.get_param("~point_cloud_path", "")
@@ -315,15 +317,19 @@ class ReactiveControllerNode:
     def setup_ruckig(self):
         """Initialize Ruckig for trajectory smoothing"""
         try:
-            # Conservative limits for Franka Panda (adjust as needed)
+            # Gentle limits to avoid tau_J_range_violation reflex aborts.
+            # Ruckig is time-OPTIMAL: it runs the robot as fast as these allow,
+            # so these ARE the speed/torque knob. Start gentle, raise as needed.
             self.ruckig_limits = {
-                'max_velocity': [2.0, 2.0, 2.0, 2.0, 2.5, 2.5, 2.5],  # rad/s
-                'max_acceleration': [3.0, 3.0, 3.0, 3.0, 5.0, 5.0, 5.0],  # rad/s²
-                'max_jerk': [10.0, 10.0, 10.0, 10.0, 15.0, 15.0, 15.0],  # rad/s³
+                'max_velocity': [0.8, 0.8, 0.8, 0.8, 1.0, 1.0, 1.0],  # rad/s
+                'max_acceleration': [1.0, 1.0, 1.0, 1.0, 1.5, 1.5, 1.5],  # rad/s²
+                'max_jerk': [4.0, 4.0, 4.0, 4.0, 6.0, 6.0, 6.0],  # rad/s³
             }
             
-            # Initialize Ruckig
-            self.ruckig = ruckig.Ruckig(7, 1.0/RUCKIG_CONTROL_RATE)  # 7 DoF, 50Hz
+            # Initialize Ruckig. The control timestep MUST match the control
+            # loop period (self.control_rate), otherwise the generated trajectory
+            # advances at the wrong rate and the robot lurches/lags.
+            self.ruckig = ruckig.Ruckig(7, 1.0 / self.control_rate)  # 7 DoF
             self.ruckig_input = InputParameter(7)
             self.ruckig_output = OutputParameter(7)
             
@@ -341,53 +347,45 @@ class ReactiveControllerNode:
 
     def smooth_with_ruckig(self, current_q: np.ndarray, neural_waypoints: list) -> tuple:
         if not self.ruckig_initialized or len(neural_waypoints) == 0:
-            return neural_waypoints[0] if neural_waypoints else current_q, np.zeros(7), np.zeros(7)
+            return neural_waypoints[-1] if neural_waypoints else current_q, np.zeros(7), np.zeros(7)
 
         try:
-            # Set current state
-            self.ruckig_input.current_position = current_q
-            
-            if self.current_joint_velocity is not None:
-                self.ruckig_input.current_velocity = self.current_joint_velocity.tolist()
-            else:
+            # On the first cycle of a control session, seed Ruckig's internal
+            # state from the measured robot state. After that, run it as a
+            # CONTINUOUS online trajectory generator by feeding its own previous
+            # output back in (pass_to_input). Re-seeding from (laggy/noisy)
+            # feedback every cycle is what makes the motion jerky.
+            if not self.ruckig_started:
+                self.ruckig_input.current_position = np.asarray(current_q).tolist()
                 self.ruckig_input.current_velocity = [0.0] * 7
-                
-            if self.current_joint_acceleration is not None:
-                self.ruckig_input.current_acceleration = self.current_joint_acceleration.tolist()
-            else:
                 self.ruckig_input.current_acceleration = [0.0] * 7
+                self.ruckig_started = True
 
-            target_waypoint = neural_waypoints[-1]
+            # Track the latest neural prediction, coming smoothly to rest at it.
+            # Target velocity/acceleration must be ZERO, otherwise the goal
+            # chases itself and the robot never settles.
+            self.ruckig_input.target_position = np.asarray(neural_waypoints[-1]).tolist()
+            self.ruckig_input.target_velocity = [0.0] * 7
+            self.ruckig_input.target_acceleration = [0.0] * 7
 
-            if self.current_joint_velocity is not None:
-                target_velocity = self.current_joint_velocity.tolist()
-            else:
-                target_velocity = [0.0] * 7
-                
-            if self.current_joint_acceleration is not None:
-                target_acceleration = self.current_joint_acceleration.tolist()
-            else:
-                target_acceleration = [0.0] * 7
-
-            self.ruckig_input.target_position = target_waypoint
-            self.ruckig_input.target_velocity = target_velocity
-            self.ruckig_input.target_acceleration = target_acceleration
-
-            # Calculate trajectory
             result = self.ruckig.update(self.ruckig_input, self.ruckig_output)
 
-            if result == Result.Finished:
-                smoothed_q = self.ruckig_output.new_position
-                smoothed_velocity = self.ruckig_output.new_velocity
-                smoothed_acceleration = self.ruckig_output.new_acceleration
+            # Working == still en route, Finished == arrived. Both are valid;
+            # only the Error.* results mean Ruckig actually failed.
+            if result in (Result.Working, Result.Finished):
+                smoothed_q = np.array(self.ruckig_output.new_position)
+                smoothed_velocity = np.array(self.ruckig_output.new_velocity)
+                smoothed_acceleration = np.array(self.ruckig_output.new_acceleration)
+                # Carry state forward so the next cycle continues this trajectory.
+                self.ruckig_output.pass_to_input(self.ruckig_input)
                 return smoothed_q, smoothed_velocity, smoothed_acceleration
             else:
-                rospy.logwarn_throttle(5, f"Ruckig failed (result: {result}), using neural output")
-                return neural_waypoints[0], np.zeros(7), np.zeros(7)
+                rospy.logwarn_throttle(5, f"Ruckig error (result: {result}), using neural output")
+                return np.asarray(neural_waypoints[-1]), np.zeros(7), np.zeros(7)
 
         except Exception as e:
             rospy.logerr_throttle(5, f"Ruckig smoothing error: {e}")
-            return neural_waypoints[0] if neural_waypoints else current_q, np.zeros(7), np.zeros(7)
+            return (np.asarray(neural_waypoints[-1]) if neural_waypoints else current_q), np.zeros(7), np.zeros(7)
 
     def franka_state_callback(self, msg: JointState):
         """
@@ -561,6 +559,7 @@ class ReactiveControllerNode:
             self.maintenance_joint_state = None  # Clear maintenance state
             self.waypoint_buffer = []  # Clear waypoint buffer on new target
             self.control_step_count = 0  # Reset step counter for new target
+            self.ruckig_started = False  # Re-seed Ruckig OTG from current robot state
 
             # Stop current control if running
             if self.is_controlling:
