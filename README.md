@@ -1,4 +1,75 @@
-# Motion Policy Networks
+# Motion Policy Networks — research fork
+
+A fork of [NVlabs/motion-policy-networks](https://github.com/NVlabs/motion-policy-networks)
+(MPiNets, Fishman et al., CoRL 2022) used to explore alternative policy
+architectures, training objectives, and reactive control for the Franka Panda.
+
+Upstream's documentation is preserved below and still applies — the Docker
+image, data generation pipeline, and training entry points are unchanged.
+**What is specific to this fork lives on the feature branches, not on `main`.**
+
+## Branch map
+
+Work here is organised one branch per research direction. All of them fork from
+a common point (`ce2a9fc`, 2025-07-24) and are *not* merged into each other, so
+each is read as a standalone variant of the baseline.
+
+`main` is the integration branch: the upstream code plus the shared additions
+(cluster submission scripts, expanded metrics, a reactive controller, and
+`mpinets/generate_obstacle_sdf_pc.py`).
+
+### Model architectures
+
+| Branch | Direction | Key files |
+|---|---|---|
+| `transformer` | Replaces the MLP policy head with a transformer over the point-cloud features — `MotionPolicyTransformer` on top of `MPiFormerPointNet` | `mpinets/mpiformer.py`, `mpinets/transformer.py` |
+| `flow-matching` | Recasts the policy as a conditional flow-matching model: `FlowMatchingMotionPolicyNetwork` integrates a learned velocity field instead of regressing a single step | `mpinets/model.py` |
+| `act` | Action chunking — the policy predicts a horizon of joint deltas per forward pass rather than one | `mpinets/model.py`, `mpinets/data_loader.py` |
+| `mpinet_finetune` | Fine-tunes from the released MPiNets checkpoint, keeping the original architecture intact for a like-for-like comparison | `mpinets/mpinet_model.py`, `mpinets/mpinet_model_opt.py` |
+
+### Training objectives
+
+| Branch | Direction | Key files |
+|---|---|---|
+| `opt` | Test-time trajectory optimisation on top of the policy rollout, with point-cloud collision and self-collision terms | `mpinets/loss.py` (`trajectory_opt_pointcld*`), `mpinets/run_inference_opt.py` |
+| `opt_path_length` | Adds a joint-space path-length metric and optimises against it, penalising the detours the baseline takes | `mpinets/metrics.py` |
+| `her` | Hindsight experience replay — failed rollouts are relabelled against the reached pose and cached across epochs by a Lightning callback | `mpinets/her_callback.py` |
+
+### Deployment and tooling
+
+| Branch | Direction | Key files |
+|---|---|---|
+| `reactive_control` | Closed-loop replanning against a live point cloud, rather than open-loop execution of one rollout | `interactive_demo/mpinets_ros/nodes/reactive_controller.py` |
+| `bbx` | Two-pose demo flow and bounding-box scene handling for the ROS demo | `nodes/two_pose_interaction_node.py`, `mpinets/save_expert_trajectory.py` |
+| `demo` | Scene library for demos — a `mpinets/environments/` package with cabinet and base environments | `mpinets/environments/`, `mpinets/run_interactive_cabinet.py` |
+| `tools` | Analysis utilities: solve a single expert problem, visualise expert vs policy, failure breakdowns | `mpinets/solve_expert_problem.py`, `mpinets/vis_expert.py` |
+| `update` | Longest-running integration branch, carrying the accumulated fixes the variants branch from | — |
+
+To compare a variant against the baseline:
+
+```bash
+git diff main...<branch> -- mpinets/
+```
+
+### Cluster
+
+Branches other than `main` carry `cluster/` — SLURM submission and Singularity
+wrappers for running training on ETH Euler:
+
+```bash
+bash cluster/submit_job_slurm.sh
+```
+
+## Data and checkpoints
+
+Nothing large is tracked here. `checkpoints/`, `problems/`, `*.ckpt`, `*.pkl`
+and `*.npy` are gitignored; download the datasets and the pretrained checkpoint
+from the Zenodo links in the upstream sections below.
+
+---
+
+# Upstream README
+
 This repo has the expert data generation infrastructure and Pytorch implementation of [MPiNets](https://mpinets.github.io/).
 
 <img src="assets/readme1.gif" width="256" height="172" title="readme1">  <img src="assets/readme2.gif" width="256" height="172" title="readme2"> <img src="assets/readme3.gif" width="256" height="172" title="readme3">

@@ -175,3 +175,12 @@ problems/
 .vscode/
 
 .npy
+
+# ---- Agent / tooling scratch ----
+.opencode/
+.ruff_cache/
+.claude/
+
+# ---- Debug dumps & scratch geometry ----
+*.ply
+*.sdf
