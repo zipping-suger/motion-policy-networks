@@ -174,7 +174,7 @@ problems/
 
 .vscode/
 
-.npy
+*.npy
 
 # ---- Agent / tooling scratch ----
 .opencode/
