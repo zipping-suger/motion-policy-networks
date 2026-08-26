@@ -177,3 +177,12 @@ problems/
 
 # any point cloud files .npy
 *.npy
+
+# ---- Agent / tooling scratch ----
+.opencode/
+.ruff_cache/
+.claude/
+
+# ---- Debug dumps \& scratch geometry ----
+*.ply
+*.sdf
