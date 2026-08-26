@@ -182,3 +182,6 @@ problems/
 # ---- Debug dumps \& scratch geometry ----
 *.ply
 *.sdf
+
+# any point cloud files
+*.npy
